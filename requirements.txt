@@ -8,3 +8,4 @@ statsmodels
 pyarrow
 yfinance
 scikit-learn
+xgboost

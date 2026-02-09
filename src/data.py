@@ -83,13 +83,9 @@ class BinanceFuturesFetcher:
         """Fetch klines for a single symbol"""
         params = {'symbol': symbol, 'interval': interval}
         
-        # User logic: allow strict limit override
-        if limit is not None:
-             params['limit'] = limit
-             # Ignore start/end if limit is provided
-        else:
-             if start_time: params['startTime'] = start_time
-             if end_time: params['endTime'] = end_time
+        if start_time: params['startTime'] = start_time
+        if end_time: params['endTime'] = end_time
+        if limit: params['limit'] = min(limit, 1500)
         
         raw = self._request(self.KLINES, params)
         if not raw: return pd.DataFrame()
@@ -109,40 +105,67 @@ class BinanceFuturesFetcher:
         df = df.sort_values('open_time')
         return df[['open_time', 'open', 'high', 'low', 'close', 'volume', 'quote_volume']]
 
-    def fetch_history(self, symbol: str, interval: str, start_dt: datetime, end_dt: datetime, limit: int = 1500) -> pd.DataFrame:
-        """Fetch full history by chunking"""
-        start_ts = int(start_dt.timestamp() * 1000)
-        end_ts = int(end_dt.timestamp() * 1000)
-        
+    def fetch_history(self, 
+                      symbol: str, 
+                      interval: str, 
+                      years: float = 0,
+                      start_time: Union[str, int, datetime, None] = None, 
+                      end_time: Union[str, int, datetime, None] = None, 
+                      limit: int = 1500) -> pd.DataFrame:
+        """
+        Fetch full history by chunking with retries.
+        Supports flexible time parameters similar to fetch_binance_data.
+        """
+        # Calculate start_ts and end_ts in milliseconds
+        if start_time is None and end_time is None:
+            # use years if provided, else default to some recent period
+            days = int(365 * years) if years > 0 else 30
+            start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+            end_ts = int(datetime.now().timestamp() * 1000)
+        else:
+            # end_time defaults to now if not provided
+            if end_time is None:
+                end_ts = int(datetime.now().timestamp() * 1000)
+            elif isinstance(end_time, (str, datetime)):
+                end_ts = int(pd.to_datetime(end_time).timestamp() * 1000)
+            else:
+                end_ts = int(end_time)
+
+            # start_time calculation
+            if isinstance(start_time, (str, datetime)):
+                start_ts = int(pd.to_datetime(start_time).timestamp() * 1000)
+            elif start_time is not None:
+                start_ts = int(start_time)
+            else:
+                # fall back to years if start_time is None
+                days = int(365 * years) if years > 0 else 30
+                start_ts = int((pd.to_datetime(end_ts, unit='ms') - timedelta(days=days)).timestamp() * 1000)
+
         all_dfs = []
         current_start = start_ts
-        
-        # Note: We do NOT pass 'limit' here because fetch_klines strict logic 
-        # would ignore start_time if limit is passed.
-        # We rely on default binance limit (500) for safe pagination.
+        max_retries = 3
         
         while current_start < end_ts:
-            df = self.fetch_klines(symbol, interval, start_time=current_start, end_time=end_ts)
+            df = pd.DataFrame()
+            for attempt in range(max_retries):
+                try:
+                    df = self.fetch_klines(symbol, interval, start_time=current_start, end_time=end_ts, limit=limit)
+                    if not df.empty:
+                        break
+                except Exception as e:
+                    logger.warning(f"Retry {attempt+1}/{max_retries} for {symbol} due to: {e}")
+                    time.sleep(1)
+            
             if df.empty:
                 break
+                
             all_dfs.append(df)
-            
-            last_close = df.iloc[-1]['open_time']
-            # Next start is last open_time + interval
-            # Or simplified: use close_time + 1ms from last candle
-            # But binance uses open_time for startTime filtering.
-            
-            # Safe increment: last open time timestamp + candle duration? 
-            # Or just take last open_time + 1ms? 
-            # Actually fetching with startTime returns >= startTime. 
-            # So if we use last candle's open time, we get duplicates.
-            # We should use last candle's open_time + 1ms? 
-            # Better: take the max timestamp from df
             last_ts = int(df.iloc[-1]['open_time'].timestamp() * 1000)
-            if last_ts >= end_ts:
-                break
-            current_start = last_ts + 1  # ensure forward progress
             
+            if last_ts >= end_ts or len(df) < limit:
+                break
+            
+            current_start = last_ts + 1  # ensure forward progress
             time.sleep(self.rate_limit_delay)
             
         if not all_dfs:
@@ -150,6 +173,38 @@ class BinanceFuturesFetcher:
             
         final_df = pd.concat(all_dfs).drop_duplicates('open_time').sort_values('open_time').reset_index(drop=True)
         return final_df
+
+    def fetch_candles(self, symbol: str, interval: str, limit: int = 1000) -> pd.DataFrame:
+        """
+        Fetch exactly N candles by chunking backwards from current time.
+        """
+        all_dfs = []
+        current_end = int(datetime.now().timestamp() * 1000)
+        remaining = limit
+        
+        while remaining > 0:
+            fetch_limit = min(remaining, 1500)
+            df = self.fetch_klines(symbol, interval, end_time=current_end, limit=fetch_limit)
+            
+            if df.empty:
+                break
+            
+            all_dfs.append(df)
+            remaining -= len(df)
+            
+            # Move current_end to the oldest candle's open time - 1ms
+            current_end = int(df['open_time'].min().timestamp() * 1000) - 1
+            
+            if len(df) < fetch_limit:
+                break
+                
+            time.sleep(self.rate_limit_delay)
+            
+        if not all_dfs:
+            return pd.DataFrame()
+            
+        final_df = pd.concat(all_dfs).drop_duplicates('open_time').sort_values('open_time').reset_index(drop=True)
+        return final_df.tail(limit)
 
 
 class DataManager:

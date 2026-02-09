@@ -1,11 +1,12 @@
 """
-Data Loader Page
+Data Loader Page - Simplified & Compact
 """
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import sys
 import os
+import time
 
 # Add parent directory to path to import src
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -13,135 +14,129 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.data import BinanceFuturesFetcher, DataManager
 from src.config import AVAILABLE_INTERVALS, DEFAULT_FETCH_INTERVALS, MANDATORY_CRYPTO
 
-st.markdown("## Data Loader")
+st.set_page_config(page_title="Data Loader", layout="wide")
+st.markdown("### Data Loader")
 
-# Initialize managers
-# Initialize managers
-if 'fetcher' not in st.session_state or not hasattr(st.session_state.fetcher, 'get_all_symbols'):
+# Initialize managers in session state
+if 'fetcher' not in st.session_state:
     st.session_state.fetcher = BinanceFuturesFetcher()
+if 'selected_symbols' not in st.session_state:
+    st.session_state.selected_symbols = set(MANDATORY_CRYPTO)
+if 'fetch_logs' not in st.session_state:
+    st.session_state.fetch_logs = []
 
 fetcher = st.session_state.fetcher
 manager = DataManager()
 
-# Sidebar / Settings
-with st.container():
-    col1, col2 = st.columns([1, 2])
+# --- SIDEBAR: SYMBOL SELECTION (Compact) ---
+with st.sidebar:
+    st.subheader("Selection")
     
-    with col1:
-        st.subheader("Configuration")
-        
-        top_n = st.number_input("Top Symbols by Volume", min_value=0, max_value=200, value=50, step=10)
-        
-        # Specific Ticker Selection (Formatted as comma-separated string)
-        specific_tickers_input = st.text_area("Add Specific Tickers (Comma separated)", placeholder="BTCUSDT, ETHUSDT, SOLUSDT")
-        
-        intervals = st.multiselect(
-            "Select Timeframes",
-            options=AVAILABLE_INTERVALS,
-            default=DEFAULT_FETCH_INTERVALS
-        )
-        
-        # Data Fetch Mode
-        fetch_mode = st.radio("Fetch Mode", ["Date Range", "Candle Count (Limit)"])
-        
-        limit_val = None
-        start_date = None
-        end_date = None
-        
-        if fetch_mode == "Date Range":
-            days_back = st.slider("Days of History (Max 365)", min_value=1, max_value=365, value=14)
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days_back)
-        else:
-            limit_val = st.number_input("Number of Candles (Limit)", min_value=100, max_value=10_000, value=1000, step=100)
-        
-        fetch_btn = st.button("Fetch Data", type="primary", use_container_width=True)
+    # Quick Add Section
+    with st.expander("Filter Tool", expanded=False):
+        top_n = st.number_input("Top Liquidity N", min_value=0, max_value=200, value=50, step=10)
+        if st.button("Filter"):
+            with st.spinner(""):
+                st.session_state.selected_symbols.update(fetcher.get_top_volume_symbols(top_n=top_n))
+                st.rerun()
 
-    with col2:
-        st.subheader("Cache Status")
-        # cached_files = manager.get_existing_symbols() # Legacy
-        
-        # We'll fetch detailed inventory when the page loads? 
-        # Might be slow if many files. Let's do it inside the expander check?
-        # Streamlit execution model runs top to bottom.
-        
-        # Let's just show count first
+    # Manual Add Section
+    manual_input = st.text_input("Add Ticker (Comma separated)", placeholder="BTCUSDT...")
+    if st.button("Add", use_container_width=True):
+        if manual_input:
+            new_tickers = [s.strip().upper() for s in manual_input.split(',') if s.strip()]
+            st.session_state.selected_symbols.update(new_tickers)
+            st.rerun()
+    
+    st.markdown("---")
+    # Current List Management
+    sorted_symbols = sorted(list(st.session_state.selected_symbols))
+    st.write(f"Active List: {len(sorted_symbols)}")
+    
+    updated_selection = st.multiselect(
+        "Manage List",
+        options=sorted_symbols,
+        default=sorted_symbols,
+        label_visibility="collapsed"
+    )
+    if len(updated_selection) != len(st.session_state.selected_symbols):
+        st.session_state.selected_symbols = set(updated_selection)
+        st.rerun()
+
+    if st.button("Reset Selection", use_container_width=True):
+        st.session_state.selected_symbols = set(MANDATORY_CRYPTO)
+        st.rerun()
+
+# --- MAIN PAGE: FETCH SETTINGS & LOGS ---
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.write("**Fetch Configuration**")
+    intervals = st.multiselect(
+        "Timeframes",
+        options=AVAILABLE_INTERVALS,
+        default=DEFAULT_FETCH_INTERVALS
+    )
+    
+    fetch_mode = st.radio("Mode", ["Range", "Limit"], horizontal=True)
+    params = {}
+    if fetch_mode == "Range":
+        days = st.number_input("Days Back", min_value=1, max_value=100_000, value=30)
+        params['end'] = datetime.now()
+        params['start'] = params['end'] - timedelta(days=days)
+    else:
+        params['limit'] = st.number_input("Candles", min_value=100, max_value=20_000, value=1000, step=100)
+    
+    fetch_btn = st.button("Execute Data Sync", type="primary", use_container_width=True)
+
+    # Simple Inventory Preview
+    with st.expander("Cache Info", expanded=False):
         inventory = manager.get_inventory()
         total_files = sum(len(v) for v in inventory.values())
+        st.write(f"Files: {total_files}")
+        if st.button("View Metadata"):
+            st.session_state.show_meta = not st.session_state.get('show_meta', False)
         
-        if total_files > 0:
-            st.success(f"Found {total_files} cached files.")
-            with st.expander("View Cached Files (Details)"):
-                with st.spinner("Loading cache details..."):
-                    meta = manager.get_cache_metadata()
-                    if meta:
-                        st.dataframe(pd.DataFrame(meta))
-                    else:
-                        st.write("No valid metadata found.")
-        else:
-            st.warning("No data found in cache.")
+        if st.session_state.get('show_meta', False):
+            st.dataframe(pd.DataFrame(manager.get_cache_metadata()), hide_index=True)
 
-# Execution
-if fetch_btn:
-    if not intervals:
-        st.error("Please select at least one timeframe.")
-    else:
-        status_container = st.container()
-        progress_bar = st.progress(0)
-        
-        with status_container:
-            st.info("Preparing Symbol List...")
+with col2:
+    st.write("**Activity Logs**")
+    log_area = st.empty()
+    
+    if fetch_btn:
+        if not intervals:
+            st.error("Select interval")
+        elif not st.session_state.selected_symbols:
+            st.error("Select symbols")
+        else:
+            st.session_state.fetch_logs = []
+            pbar = st.progress(0.0)
+            all_syms = sorted(list(st.session_state.selected_symbols))
+            total = len(all_syms) * len(intervals)
+            count_done = 0
             
-            # 1. Fetch Top Crypto
-            crypto_symbols = fetcher.get_top_volume_symbols(top_n=top_n)
-            
-            # 2. Add Specific Tickers
-            if specific_tickers_input:
-                # Parse comma-separated string
-                specific_tickers = [s.strip().upper() for s in specific_tickers_input.split(',') if s.strip()]
-                crypto_symbols.extend(specific_tickers)
-            
-            # 3. Mandatory Symbols
-            mandatory_crypto = MANDATORY_CRYPTO
-            
-            # Merge Crypto
-            final_crypto = list(set(crypto_symbols + mandatory_crypto))
-            
-            # Combine All
-            all_symbols = final_crypto
-            
-            st.write(f"Targets: {len(final_crypto)} Crypto Symbols.")
-            
-            total_tasks = len(all_symbols) * len(intervals)
-            completed = 0
-            failed_symbols = []
-            
-            for symbol in all_symbols:
-                for interval in intervals:
-                    try:
-                        # Fetch based on mode
-                        if fetch_mode == "Date Range":
-                            df = fetcher.fetch_history(symbol, interval, start_date, end_date)
-                        else:
-                            # Fetch by Limit
-                            df = fetcher.fetch_klines(symbol, interval, limit=limit_val)
-                            
-                        if not df.empty:
-                            manager.save_data(df, symbol, interval)
-                        else:
-                            if symbol not in failed_symbols:
-                                failed_symbols.append(symbol)
-                    except Exception as e:
-                        if symbol not in failed_symbols:
-                            failed_symbols.append(symbol)
-                        print(f"Error fetching {symbol}: {e}")
-                        
-                    completed += 1
-                    progress = completed / total_tasks
-                    progress_bar.progress(progress)
-            
-            if failed_symbols:
-                st.warning(f"Skipped {len(failed_symbols)} symbols: {', '.join(failed_symbols)}")
+            for sym in all_syms:
+                for inter in intervals:
+                    st.session_state.fetch_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sym} {inter}...")
+                    log_area.code("\n".join(st.session_state.fetch_logs[-12:]))
                     
-            st.success("Analysis Data Ready!")
-            st.rerun()
+                    try:
+                        if fetch_mode == "Range":
+                            df = fetcher.fetch_history(sym, inter, start_time=params['start'], end_time=params['end'])
+                        else:
+                            df = fetcher.fetch_candles(sym, inter, limit=params['limit'])
+                        
+                        if not df.empty:
+                            manager.save_data(df, sym, inter)
+                            st.session_state.fetch_logs.append(f"  > Saved {len(df)} candles")
+                        else:
+                            st.session_state.fetch_logs.append(f"  ! Missing data")
+                    except Exception as e:
+                        st.session_state.fetch_logs.append(f"  ! Error: {str(e)}")
+                    
+                    count_done += 1
+                    pbar.progress(count_done / total)
+                    log_area.code("\n".join(st.session_state.fetch_logs[-12:]))
+            
+            st.success("Sync Complete")

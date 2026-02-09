@@ -176,6 +176,18 @@ class MetricsEngine:
         # 11. Return Skewness (Rolling)
         res['skewness'] = ret.rolling(40).skew()
         
+        # 12. Lagged Returns
+        res['return_lag1'] = ret.shift(1)
+        res['return_lag2'] = ret.shift(2)
+        res['return_lag3'] = ret.shift(3)
+        
+        # 13. Autocorrelation (5-window)
+        # Using rolling apply for autocorrelation
+        res['autocorr_5'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
+        
+        # 14. EWMA (Simple EMA of price normalized by price)
+        res['ewma'] = MetricsEngine.ema(close, 20) / close
+        
         return res
 
     @staticmethod
@@ -436,7 +448,11 @@ class MetricsEngine:
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
         
         # New Metrics (Calculated via the all-in-one helper)
-        new_metrics = ['ewva', 'aroon_osc', 'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'rel_strength_z', 'vam', 'skewness']
+        new_metrics = [
+            'ewva', 'aroon_osc', 'bbp', 'rsi_norm', 'return_z', 'atr_norm', 
+            'cmf', 'vwap_z', 'rel_strength_z', 'vam', 'skewness',
+            'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma'
+        ]
         
         if metric_name in new_metrics:
             all_inds = MetricsEngine.calculate_all_indicators(df, benchmark_returns)

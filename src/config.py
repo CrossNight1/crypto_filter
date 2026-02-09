@@ -62,6 +62,10 @@ METRIC_LABELS = {
     'price_sma_diff': 'Price vs SMA %',
     'vam': 'VAM (Vol-Adj Momentum)',
     'skewness': 'Return Skewness',
+    'return_lag1': 'Return Lag 1',
+    'return_lag2': 'Return Lag 2',
+    'return_lag3': 'Return Lag 3',
+    'autocorr_5': 'Autocorr (5)',
     'None': 'None'
 }
 
@@ -70,5 +74,6 @@ ALL_METRICS = [
     'beta', 'alpha', 'volatility', 'sharpe', 'fip', 'return', 
     'metric_return', 'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
     'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 
-    'rel_strength_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness'
+    'rel_strength_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
+    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma'
 ]

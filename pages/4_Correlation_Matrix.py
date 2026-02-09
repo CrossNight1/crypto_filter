@@ -12,6 +12,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.data import DataManager
+from ml_engine.analysis.correlation import CorrelationEngine
 
 st.set_page_config(page_title="Correlation Matrix", page_icon="🔗", layout="wide")
 
@@ -83,27 +84,10 @@ if st.button("Generate Matrix"):
         # min_periods ensures we don't return junk correlation from too few points.
         
         # Calculate Correlation
-        corr_matrix = wide_df.corr(method=corr_method, min_periods=min_data_points)
+        raw_corr_matrix = CorrelationEngine.calculate_matrix(data_map, method=corr_method, min_periods=min_data_points)
         
-        # Post-calculation cleanup: "dropit, do not show blank"
-        # Iteratively drop symbols with the most NaNs in the correlation matrix
-        dropped_corr_symbols = []
-        
-        while corr_matrix.isna().any().any():
-            # Count NaNs per symbol (row)
-            nan_counts = corr_matrix.isna().sum()
-            
-            # Find worst offender
-            if nan_counts.max() == 0: break # Should be covered by while condition
-            
-            worst_symbol = nan_counts.idxmax()
-            
-            # Drop from matrix (both row and col)
-            corr_matrix = corr_matrix.drop(index=worst_symbol, columns=worst_symbol)
-            dropped_corr_symbols.append(worst_symbol)
-            
-            if len(corr_matrix) < 2:
-                break
+        # Filter blanks
+        corr_matrix, dropped_corr_symbols = CorrelationEngine.filter_blanks(raw_corr_matrix)
         
         if len(corr_matrix) < 2:
              st.error(f"After filtering blanks, not enough symbols remain to plot. Consider lowering 'Min Overlapping Samples'.")
