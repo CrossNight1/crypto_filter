@@ -193,7 +193,7 @@ class MetricsEngine:
         res['autocorr_5'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
         
         # 14. EWMA (Simple EMA of price normalized by price)
-        res['ewma'] = MetricsEngine.ema(close, int(window/2)) / close
+        res['ewma'] = MetricsEngine.ema(close, window) / close
         
         # 15. Imbalance Bar
         body = (close - df['open']).abs()
@@ -206,6 +206,7 @@ class MetricsEngine:
         # Sharpe & Volatility
         res['sharpe'] = (ret.ewm(span=window).mean() / ret.ewm(span=window).std()) * np.sqrt(ann_factor)
         res['volatility'] = ret.ewm(span=window).std() * np.sqrt(ann_factor)
+        res['vol_imbalance'] = ret.ewm(span=window).std() / ret.ewm(span=window * 10).std()
         
         # FIP (Frog-in-the-Pan)
         def fip_func(x):

@@ -68,6 +68,7 @@ METRIC_LABELS = {
     'autocorr_5': 'Autocorr (5)',
     'ewma': 'EWMA (Price Norm)',
     'imbalance_bar': 'Imbalance Bar',
+    'vol_imbalance': 'Volatility Imbalance',
     'None': 'None'
 }
 
@@ -80,8 +81,8 @@ ALL_METRICS = [
 ]
 
 DEFAULT_FEATURES = [
-    'volatility', 'sharpe', 'fip', 
-    'ewva', 'aroon_osc', 
+    'volatility', 'sharpe',
+    'ewva', 'vol_imbalance',
     'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
     'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar'
 ]

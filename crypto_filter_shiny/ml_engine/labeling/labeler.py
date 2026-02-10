@@ -460,3 +460,44 @@ class CombinedLabeler:
         )
         
         return pd.DataFrame({"price": prices.values, "label": combined}, index=prices.index)
+
+class TailSetLabeler:
+    def __init__(self, std_window=100, ret_window=1, threshold=1.0, min_periods=None, eps=1e-12):
+        self.std_window = std_window
+        self.ret_window = ret_window
+        self.threshold = threshold
+        self.min_periods = min_periods if min_periods is not None else std_window
+        self.eps = eps
+
+    def label(self, prices):
+        prices = pd.Series(prices).astype(float).dropna().reset_index(drop=True)
+
+        if len(prices) < 2:
+            return pd.DataFrame({"price": prices, "label": np.zeros(len(prices))})
+
+        log_rets = np.log(prices).diff()
+
+        if self.ret_window > 1:
+            ret_series = log_rets.rolling(self.ret_window, min_periods=self.ret_window).sum()
+        else:
+            ret_series = log_rets
+
+        rolling_std = ret_series.rolling(self.std_window, min_periods=self.min_periods).std()
+        rolling_std = rolling_std.clip(lower=self.eps)
+
+        upper = self.threshold * rolling_std
+        lower = -self.threshold * rolling_std
+
+        labels = np.zeros(len(prices))
+        labels[ret_series > upper] = 1
+        labels[ret_series < lower] = -1
+
+        return pd.DataFrame(
+            {
+                "price": prices,
+                "label": labels,
+                "ret": ret_series,
+                "rolling_std": rolling_std
+            },
+            index=prices.index,    
+        )

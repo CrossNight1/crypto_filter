@@ -12,7 +12,10 @@ from sklearn.linear_model import LogisticRegression
 import asyncio
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from scipy.optimize import minimize
+from scipy.stats import skew, kurtosis
 from numba import njit
+from scipy.stats import probplot
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
@@ -20,8 +23,9 @@ from src.config import METRIC_LABELS, ALL_METRICS, BENCHMARK_SYMBOL, DEFAULT_FEA
 from ml_engine.modeling.factory import ModelFactory
 from ml_engine.modeling.feature_selection import FeatureSelector
 from ml_engine.predictive.predictor import Predictor
-from ml_engine.labeling.labeler import Labeler, TripleBarrierLabeler, StationarityLabeler, CombinedLabeler
+from ml_engine.labeling.labeler import Labeler, TripleBarrierLabeler, StationarityLabeler, CombinedLabeler, TailSetLabeler
 from src.logger import logger
+from src.backtest import BacktestEngine
 
 def predictive_ui():
     return ui.layout_sidebar(
@@ -31,7 +35,6 @@ def predictive_ui():
             ui.input_radio_buttons("analysis_goal", "Analysis Goal", ["Directional", "Return Value"]),
             ui.output_ui("symbol_selection_ui"),
             ui.input_select("interval", "Interval", choices=["1h", "4h", "1d"]),
-            ui.input_select("bar_type", "Data Structure", choices=["Time Bars", "Volume Bars", "Dollar Bars"], selected="Time Bars"),
             ui.output_ui("model_select_ui"),
             ui.accordion(
                 ui.accordion_panel(
@@ -54,7 +57,6 @@ def predictive_ui():
                 open=True
             ),
         ),
-
         ui.navset_card_underline(
             # ================= DATA ENGINEERING =================
             ui.nav_panel(
@@ -62,9 +64,19 @@ def predictive_ui():
                 ui.div(
                     ui.row(
                         ui.column(
-                            6,
+                            4,
                             ui.card(
                                 ui.card_header("Structural Engineering"),
+                                ui.input_action_button(
+                                        "btn_run_engineering",
+                                        "Apply Engineering",
+                                        class_="btn-primary w-100"
+                                    ),
+                                ui.input_action_button(
+                                        "btn_auto_calibrate",
+                                        "Auto Calibrate Thresholds",
+                                        class_="btn-outline-success w-100 mt-2"
+                                    ),
                                 ui.layout_columns(
                                     ui.h6("Volume Threshold"),
                                     ui.input_numeric("vol_bar_th", None, value=10000, min=1),
@@ -75,100 +87,54 @@ def predictive_ui():
                                     ui.input_numeric("dollar_bar_th", None, value=1000000000, min=1),
                                     col_widths=[4, 5, 3]
                                 ),
+                                ui.markdown("---"),
                                 ui.layout_columns(
-                                    ui.input_action_button(
-                                        "btn_run_engineering",
-                                        "Apply Engineering",
-                                        class_="btn-outline-primary w-100 mt-2"
-                                    ),
+                                    ui.h6("Structure Analysis"),
+                                    ui.input_select("bar_type", None, choices=["Time Bars", "Volume Bars", "Dollar Bars"], selected="Time Bars"),
                                     col_widths=[4, 5, 3]
                                 ),
-                                ui.markdown("---"),
                                 ui.h6("Comparison Stats"),
                                 ui.output_table("engineering_stats_table")
                             )
                         ),
                         ui.column(
-                            6,
+                            8,
                             ui.card(
                                 ui.card_header("Return Distribution Comparison"),
                                 output_widget("engineering_dist_plot"),
                                 full_screen=True
                             )
                         )
-                    ),
+                    ),                  
                     ui.row(
                         ui.column(
-                            6,
-                            ui.card(
-                                ui.card_header("Feature Engineering"),
-                                ui.layout_columns(
-                                    ui.input_selectize("eng_features", "Candidate Features", choices=ALL_METRICS, multiple=True, selected=DEFAULT_FEATURES),
-                                    ui.input_numeric("eng_lookback", "Lookback", value=20, min=2),
-                                    ui.input_numeric("eng_min_samples", "Min Samples", value=100, min=10),
-                                    ui.input_numeric("vif_th", "VIF Threshold", value=10.0, min=1.1, step=0.5),
-                                    col_widths=[12, 4, 4, 4]
-                                ),
-                                ui.input_action_button("btn_run_feature_analysis", "Analyze & Filter Features", class_="btn-primary w-100"),
-                                ui.markdown("---"),
-                                ui.h6("VIF & Feature Stats (Filtered by Threshold)"),
-                                ui.output_table("feature_stats_table")
-                            )
-                        ),
-                        ui.column(
-                            6,
-                            ui.card(
-                                ui.card_header("Feature Distribution"),
-                                output_widget("feature_dist_plot"),
-                                full_screen=True
-                            )
-                        )
-                    )
-                ),
-                value="Data Engineering"
-            ),
-
-            # ================= LABELING =================
-            ui.nav_panel(
-                "Labeling",
-                ui.div(
-
-                    ui.row(
-                        ui.column(
-                            12,
-                            ui.card(
-                                ui.card_header("Labeling Preview"),
-                                output_widget("label_chart"),
-                                full_screen=True
-                            )
-                        )
-                    ),
-
-                    ui.row(
-                        ui.column(
-                            3,
+                            4,
                             ui.card(
                                 ui.card_header("Labeling Settings"),
-
+                                ui.input_action_button(
+                                    "btn_run_labeling",
+                                    "Apply Labeling",
+                                    class_="btn-primary w-100"
+                                ),
                                 ui.input_select(
                                     "labeler_type",
                                     "Labeler",
-                                    choices=["Combine", "Trend", "BoxRange", "Regime"],
-                                    selected="Combine"
+                                    choices=["Combine", "Trend", "BoxRange", "Regime", "TailSet"],
+                                    selected="BoxRange"
                                 ),
 
                                 ui.panel_conditional(
                                     "input.labeler_type == 'Trend' || input.labeler_type == 'Combine'",
                                     ui.row(
-                                        ui.column(6, ui.input_numeric("amp_th_bps", "Amplitude (bps)", value=500)),
-                                        ui.column(6, ui.input_numeric("max_inactive", "Max Inactive", value=50))
+                                        ui.column(6, ui.input_numeric("amp_th_bps", "Amplitude (bps)", value=100)),
+                                        ui.column(6, ui.input_numeric("max_inactive", "Max Inactive", value=10))
                                     )
                                 ),
 
                                 ui.panel_conditional(
                                     "input.labeler_type == 'BoxRange' || input.labeler_type == 'Combine'",
                                     ui.row(
-                                        ui.column(3, ui.input_numeric("vol_window", "Vol Window", value=3)),
+                                        ui.column(3, ui.input_numeric("vol_window", "Vol Window", value=10)),
                                         ui.column(3, ui.input_numeric("upper_mult", "Upper Mult", value=2)),
                                         ui.column(3, ui.input_numeric("lower_mult", "Lower Mult", value=2)),
                                         ui.column(3, ui.input_numeric("max_holding", "Max Period", value=10))
@@ -183,25 +149,59 @@ def predictive_ui():
                                     )
                                 ),
 
-                                ui.input_action_button(
-                                    "btn_run_labeling",
-                                    "Apply Labeling",
-                                    class_="btn-outline-primary w-100 mt-2"
-                                )
+                                ui.panel_conditional(
+                                    "input.labeler_type == 'TailSet'",
+                                    ui.row(
+                                        ui.column(6, ui.input_numeric("tail_window", "Window", value=1)),
+                                        ui.column(6, ui.input_numeric("tail_threshold", "Multiplier Threshold", value=1.0, step=0.1))
+                                    )
+                                ),                                
+                                ui.markdown("---"),
+                                ui.h6("Label Distribution"),
+                                ui.output_table("dist_train_table")
                             )
                         ),
-
                         ui.column(
-                            6,
+                            8,
                             ui.card(
-                                ui.card_header("Train Distribution"),
-                                ui.output_table("dist_train_table")
+                                ui.card_header("Labeling Preview"),
+                                output_widget("label_chart"),
+                                full_screen=True
+                            )
+                        )
+                    ),
+                    ui.row(
+                        ui.column(
+                            4,
+                            ui.card(
+                                ui.card_header("Feature Engineering"),
+                                ui.input_action_button("btn_run_feature_analysis", "Analyze & Filter Features", class_="btn-primary w-100"),
+                                ui.layout_columns(
+                                    ui.input_selectize("eng_features", "Candidate Features", choices=ALL_METRICS, multiple=True, selected=DEFAULT_FEATURES),
+                                    ui.input_numeric("eng_lookback", "Lookback", value=20, min=2),
+                                    ui.input_numeric("eng_min_samples", "Min Samples", value=100, min=10),
+                                    ui.input_numeric("vif_th", "VIF Threshold", value=10.0, min=1.1, step=0.5),
+                                    col_widths=[12, 4, 4, 4]
+                                ),
+                                ui.markdown("---"),
+                                ui.h6("VIF & Feature Stats"),
+                                ui.output_table("feature_stats_table")
+                            )
+                        ),
+                        ui.column(
+                            8,
+                            ui.card(
+                                ui.card_header("Feature Distribution"),
+                                output_widget("feature_dist_plot"),
+                                full_screen=True
                             )
                         )
                     )
                 ),
-                value="Labeling"
+                value="Data Engineering"
             ),
+
+
 
             # ================= PERFORMANCE =================
             ui.nav_panel(
@@ -274,6 +274,11 @@ def predictive_server(input, output, session):
     results = reactive.Value(None)
     engineered_data = reactive.Value({"volume": None, "dollar": None, "ticker": None, "interval": None})
     eng_trigger = reactive.Value(0)
+    label_trigger = reactive.Value(0)
+    vol_th_sync = reactive.Value(None)
+    dollar_th_sync = reactive.Value(None)
+    labeled_data = reactive.Value({})  # Cache for labeled data: {ticker_interval_labeler: {"df": df, "y": y_series, "params": {...}}}
+    filtered_features = reactive.Value(None) # Cache for feature filtering results from Data Engineering
 
     @njit
     def _volume_bar_core(open_, high_, low_, close_, volume_, threshold):
@@ -411,6 +416,158 @@ def predictive_server(input, output, session):
     def btn_trigger_eng():
         eng_trigger.set(eng_trigger.get() + 1)
 
+    @reactive.Effect
+    @reactive.event(eng_trigger)
+    def _execute_engineering_on_trigger():
+        # Force execution of the lazy reactive.calc to update engineered_data cache
+        if eng_trigger.get() > 0:
+            logger.log("Predictive", "INFO", "Executing scheduled engineering calculation")
+            engineering_result()
+            
+            # Also auto-trigger labeling if we are not on Time Bars
+            if input.bar_type() != "Time Bars":
+                logger.log("Predictive", "INFO", "Auto-triggering labeling after engineering")
+                label_trigger.set(label_trigger.get() + 1)
+    @reactive.Effect
+    @reactive.event(input.vol_bar_th)
+    def _reset_vol_sync():
+        vol_th_sync.set(None)
+
+    @reactive.Effect
+    @reactive.event(input.dollar_bar_th)
+    def _reset_dollar_sync():
+        dollar_th_sync.set(None)
+
+    @reactive.Effect
+    @reactive.event(input.btn_auto_calibrate)
+    async def auto_calibrate_thresholds():
+        """Auto-calibrate Volume and Dollar thresholds to minimize normality loss"""
+        # Get current ticker and interval
+        goal = input.analysis_goal()
+        if goal == "Directional":
+            ticker = input.selected_ticker()
+        else:
+            ts = list(input.selected_tickers())
+            if not ts:
+                ui.notification_show("Please select a ticker first.", type="warning")
+                return
+            ticker = ts[0]
+        
+        interval = input.interval()
+        df = manager.load_data(ticker, interval)
+        
+        if df is None or df.empty:
+            ui.notification_show(f"No data available for {ticker}.", type="error")
+            return
+        
+        if 'open_time' in df.columns:
+            df = df.set_index(pd.to_datetime(df['open_time']))
+        
+        ui.notification_show(f"Calibrating thresholds for {ticker}... This may take 20-30 seconds.", duration=5)
+                
+        def calibration_loss(returns, N_min=10000):
+            if len(returns) < 30:
+                return 1e10
+
+            N = len(returns)
+            s = skew(returns)
+            k = kurtosis(returns) - 3
+
+            return (
+                s**2 +
+                1000 * max(0, (N_min - N)/N_min)**2
+            )
+        
+        def objective_volume(vol_threshold):
+            """Objective function for volume bars"""
+            try:
+                vol_df = construct_volume_bars(df, int(vol_threshold[0]))
+                if vol_df.empty or len(vol_df) < 10:
+                    return 1e10
+                returns = np.log(vol_df['close'] / vol_df['close'].shift(1)).dropna()
+                loss = calibration_loss(returns)
+                return loss
+            except Exception as e:
+                return 1e10
+        
+        def objective_dollar(dollar_threshold):
+            """Objective function for dollar bars"""
+            try:
+                dollar_df = construct_dollar_bars(df, int(dollar_threshold[0]))
+                if dollar_df.empty or len(dollar_df) < 10:
+                    return 1e10
+                returns = np.log(dollar_df['close'] / dollar_df['close'].shift(1)).dropna()
+                loss = calibration_loss(returns)
+                return loss
+            except Exception as e:
+                return 1e10
+
+        def objective_volume_log(x):
+            th = int(10**x[0])
+            return objective_volume([th])
+
+        def objective_dollar_log(x):
+            th = int(10**x[0])
+            return objective_dollar([th])
+        
+        # Optimize Volume threshold with multiple starting points
+        logger.log("Predictive", "INFO", "Optimizing Volume threshold...")
+        print(f"\n=== Optimizing Volume Threshold for {ticker} ===")
+        
+        best_vol_result = None
+        best_vol_loss = 1e10
+        
+        for x0 in [1000, 5000, 10000, 50000]:
+            result = minimize(
+                objective_volume_log,
+                x0=[np.log10(x0)],
+                bounds=[(np.log10(100), np.log10(1000000000))],
+                method='Nelder-Mead',
+                options={'maxiter': 200, 'xatol':1e-3, 'fatol':1e-3}
+            )
+            if result.fun < best_vol_loss:
+                best_vol_loss = result.fun
+                best_vol_result = result
+        
+        optimal_vol = int(10**best_vol_result.x[0])
+        
+        # Optimize Dollar threshold with multiple starting points
+        logger.log("Predictive", "INFO", "Optimizing Dollar threshold...")        
+        best_dollar_result = None
+        best_dollar_loss = 1e10
+        
+        for x0 in [100000000, 500000000, 1000000000, 5000000000]:
+            result = minimize(
+                objective_dollar_log,
+                x0=[np.log10(x0)],
+                bounds=[(np.log10(1000), np.log10(100000000000))],
+                method='Nelder-Mead',
+                options={'maxiter': 200, 'xatol':1e-3, 'fatol':1e-3}
+            )
+            if result.fun < best_dollar_loss:
+                best_dollar_loss = result.fun
+                best_dollar_result = result
+
+        optimal_dollar = int(10**best_dollar_result.x[0])
+        
+        # Update sync values for immediate reactive update
+        vol_th_sync.set(optimal_vol)
+        dollar_th_sync.set(optimal_dollar)
+        
+        # Update UI inputs
+        ui.update_numeric("vol_bar_th", value=optimal_vol)
+        ui.update_numeric("dollar_bar_th", value=optimal_dollar)
+        
+        ui.notification_show(
+            f"✓ Calibration complete! Volume: {optimal_vol:,}, Dollar: {optimal_dollar:,}",
+            type="message",
+            duration=10
+        )
+        logger.log("Predictive", "INFO", f"Calibrated thresholds - Vol: {optimal_vol}, Dollar: {optimal_dollar}")
+        
+        # Trigger engineering with new thresholds
+        eng_trigger.set(eng_trigger.get() + 1)
+
     @reactive.calc
     @reactive.event(eng_trigger)
     def engineering_result():
@@ -436,13 +593,15 @@ def predictive_server(input, output, session):
         time_df['ret'] = np.log(time_df['close'] / time_df['close'].shift(1))
         
         # 2. Volume Bars
-        vol_th = input.vol_bar_th()
+        v_sync = vol_th_sync.get()
+        vol_th = v_sync if v_sync is not None else input.vol_bar_th()
         vol_df = construct_volume_bars(df, vol_th)
         if not vol_df.empty:
             vol_df['ret'] = np.log(vol_df['close'] / vol_df['close'].shift(1))
             
         # 3. Dollar Bars
-        dollar_th = input.dollar_bar_th()
+        d_sync = dollar_th_sync.get()
+        dollar_th = d_sync if d_sync is not None else input.dollar_bar_th()
         dollar_df = construct_dollar_bars(df, dollar_th)
         if not dollar_df.empty:
             dollar_df['ret'] = np.log(dollar_df['close'] / dollar_df['close'].shift(1))
@@ -519,9 +678,7 @@ def predictive_server(input, output, session):
                 return None
             
             # Feature Stats (Stats + VIF)
-            stats_list = []
-            from scipy.stats import skew, kurtosis
-            
+            stats_list = []            
             vif_dict = {}
             if len(valid_feats) > 1:
                 # Multicollinearity check
@@ -549,9 +706,9 @@ def predictive_server(input, output, session):
                     "Mean": s['mean'],
                     "Std": s['std'],
                     "Skew": skew(feat_df[col]),
-                    "Kurtosis": kurtosis(feat_df[col]),
+                    "Kurtosis": kurtosis(feat_df[col], fisher=True),
                     "VIF": vif,
-                    "Keep": "YES" if vif <= v_th else "NO (High VIF)"
+                    "Keep": "YES" if vif <= v_th else "NO"
                 })
             
             stats_df = pd.DataFrame(stats_list)
@@ -574,6 +731,16 @@ def predictive_server(input, output, session):
             ui.notification_show(f"Analysis Error: {e}", type="error")
             return None
 
+    @reactive.effect
+    def _cache_filtered_features():
+        res = feature_analysis_result()
+        if res is not None:
+            # Get list of features where VIF <= threshold (the YES ones)
+            clean = [s['Feature'] for s in res['stats_df'].to_dict('records') if s['Keep'] == "YES"]
+            if clean:
+                filtered_features.set(clean)
+                logger.log("Predictive", "INFO", f"Cached {len(clean)} filtered features from Data Engineering tab.")
+
     @render.table
     def feature_stats_table():
         res = feature_analysis_result()
@@ -581,11 +748,23 @@ def predictive_server(input, output, session):
         
         df = res['stats_df'].copy()
         
-        # Format for readability
-        for col in ["Mean", "Std", "Skew", "Kurtosis", "VIF"]:
-            df[col] = pd.to_numeric(df[col], errors='coerce').map(lambda x: f"{x:.4f}")
-            
-        return df
+        # Round for display but keep as numeric for formatter if possible, 
+        # or just use the styled formatter
+        df.set_index("Feature", inplace=True)
+        
+        styled = (
+            df.style
+            .format({
+                "Mean": "{:.4f}",
+                "Std": "{:.4f}",
+                "Skew": "{:.4f}",
+                "Kurtosis": "{:.4f}",
+                "VIF": "{:.2f}"
+            })
+            .set_properties(**{"font-size": "13px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}])
+        )
+        return styled
 
     @render_widget
     def feature_dist_plot():
@@ -597,7 +776,7 @@ def predictive_server(input, output, session):
         if df.empty: return go.Figure()
         
         # Limit to first 8 for visual clarity if many survive
-        cols = df.columns[:8]
+        cols = df.columns
         
         fig = go.Figure()
         for col in cols:
@@ -613,7 +792,6 @@ def predictive_server(input, output, session):
             ))
             
         fig.update_layout(
-            title=f"Clean Feature Distributions ({res['bar_type']}) - VIF < {res['vif_threshold']}",
             template="plotly_dark",
             height=350,
             barmode='overlay',
@@ -727,8 +905,10 @@ def predictive_server(input, output, session):
                             'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive(),
                             'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()
                         }
-                    else: 
+                    elif l_type == "Regime": 
                         l_params = {'type': "Regime", 'window': input.stat_window(), 'vote_th': input.vote_th()}
+                    else:
+                        l_params = {'type': "TailSet", 'window': input.tail_window(), 'threshold': input.tail_threshold()}
 
                 for i, sym in enumerate(tickers):
                     df = None
@@ -749,32 +929,56 @@ def predictive_server(input, output, session):
                         
                         try:
                             feats_data = {feat: engine.calculate_rolling_metric(df, feat, window=ind_window, interval=interval) for feat in x_features}
+                            
+                            # Check label cache first
+                            cache_key = None
                             if is_classification:
-                                prices = df['close']
-                                if l_params['type'] == "Trend":
-                                    lobj = Labeler(amplitude_threshold=l_params['amp_th'], max_inactive_period=l_params['max_inactive'])
-                                    y_series = lobj.label(prices)['label']
-                                elif l_params['type'] == "BoxRange":
-                                    lobj = TripleBarrierLabeler(vol_window=l_params['vol_window'], upper_mult=l_params['upper_mult'], lower_mult=l_params['lower_mult'], max_holding_period=l_params['max_holding'])
-                                    y_series = lobj.label(prices)['label']
-                                elif l_params['type'] == "Combine":
-                                    lobj = CombinedLabeler(
-                                        amplitude_threshold=l_params['amp_th'], 
-                                        max_inactive_period=l_params['max_inactive'],
-                                        vol_window=l_params['vol_window'], 
-                                        upper_mult=l_params['upper_mult'], 
-                                        lower_mult=l_params['lower_mult'], 
-                                        max_holding=l_params['max_holding']
-                                    )
-                                    y_series = lobj.label(prices)['label']
-                                else: # Regime
-                                    lobj = StationarityLabeler(window=l_params['window'], vote_th=l_params['vote_th'])
-                                    y_series, _ = lobj.label(prices)
-                                y_series.index = prices.index
-                                y_series = y_series.shift(-1)
+                                cache_key = f"{sym}_{interval}_{b_type}_{l_params['type']}"
                             else:
-                                prices = pd.to_numeric(df['close'], errors='coerce').ffill().values
-                                y_series = pd.Series(np.log(prices[1:] / prices[:-1]), index=df.index[1:]).rolling(window=fwd_window).sum().shift(-fwd_window)
+                                cache_key = f"{sym}_{interval}_{b_type}_regression_{fwd_window}"
+                            
+                            label_cache = labeled_data.get()
+                            if cache_key in label_cache:
+                                print(f"✓ Using cached labels for {sym} (key: {cache_key})")
+                                y_series = label_cache[cache_key]['y']
+                            else:
+                                print(f"⚠ No cached labels found for {sym}, calculating new labels...")
+                                if is_classification:
+                                    prices = df['close']
+                                    if l_params['type'] == "Trend":
+                                        lobj = Labeler(amplitude_threshold=l_params['amp_th'], max_inactive_period=l_params['max_inactive'])
+                                        y_series = lobj.label(prices)['label']
+                                    elif l_params['type'] == "BoxRange":
+                                        lobj = TripleBarrierLabeler(vol_window=l_params['vol_window'], upper_mult=l_params['upper_mult'], lower_mult=l_params['lower_mult'], max_holding_period=l_params['max_holding'])
+                                        y_series = lobj.label(prices)['label']
+                                    elif l_params['type'] == "Combine":
+                                        lobj = CombinedLabeler(
+                                            amplitude_threshold=l_params['amp_th'], 
+                                            max_inactive_period=l_params['max_inactive'],
+                                            vol_window=l_params['vol_window'], 
+                                            upper_mult=l_params['upper_mult'], 
+                                            lower_mult=l_params['lower_mult'], 
+                                            max_holding=l_params['max_holding']
+                                        )
+                                        y_series = lobj.label(prices)['label']
+                                    elif l_params['type'] == "Regime":
+                                        lobj = StationarityLabeler(window=l_params['window'], vote_th=l_params['vote_th'])
+                                        y_series, _ = lobj.label(prices)
+                                    elif l_params['type'] == "TailSet":
+                                        w = l_params['window'] if l_params['window'] > 0 else 1
+                                        lobj = TailSetLabeler(ret_window=w, threshold=l_params['threshold'])
+                                        y_series = lobj.label(prices)['label']
+                                    
+                                    y_series.index = prices.index
+                                    
+                                    # Shift Correction for forward prediction
+                                    if l_params['type'] == "TailSet" and l_params['window'] > 1:
+                                        y_series = y_series.shift(-l_params['window'])
+                                    else:
+                                        y_series = y_series.shift(-1)
+                                else:
+                                    prices = pd.to_numeric(df['close'], errors='coerce').ffill().values
+                                    y_series = pd.Series(np.log(prices[1:] / prices[:-1]), index=df.index[1:]).rolling(window=fwd_window).sum().shift(-fwd_window)
                             
                             temp_df = pd.DataFrame(feats_data)
                             temp_df['Target_Y'] = y_series
@@ -812,8 +1016,15 @@ def predictive_server(input, output, session):
                             m, s = X_data[f].mean(), X_data[f].std()
                             if s > 1e-9: X_data[f] = (X_data[f] - m) / s
                 
-                logger.log("Predictive", "INFO", "Running VIF filter")
-                active_features = FeatureSelector.apply_vif_filter(X_data, threshold=5.0) if len(x_features) > 1 else x_features
+                # Check for manually filtered features from Data Engineering tab Cache
+                cached_feats = filtered_features.get()
+                if cached_feats and all(f in x_features for f in cached_feats):
+                    logger.log("Predictive", "INFO", f"Using {len(cached_feats)} manually filtered features from cache.")
+                    active_features = cached_feats
+                else:
+                    logger.log("Predictive", "INFO", "Running VIF filter (no cache or mismatch)")
+                    vif_threshold = input.vif_th()
+                    active_features = FeatureSelector.apply_vif_filter(X_data, threshold=vif_threshold) if len(x_features) > 1 else x_features
                 
                 if not active_features:
                     logger.log("Predictive", "ERROR", "No features left after VIF filter")
@@ -828,7 +1039,7 @@ def predictive_server(input, output, session):
                 
                 # Auto-Split Training set into 2 folds:
                 train_n = test_start
-                meta_start = int(train_n * 0.8)
+                meta_start = int(train_n * 0.2)
                 
                 logger.log("Predictive", "INFO", f"Splitting data: n={n}, test_start={test_start}, auto-split train at {meta_start}")
                 
@@ -855,36 +1066,111 @@ def predictive_server(input, output, session):
             model.fit(X_train_primary, y_train_primary)
             logger.log("Predictive", "INFO", "Primary model training complete")
 
-            # 4. Train Meta-Model on Meta-Fold
+            # 4. Train Meta-Model using Sophisticated Backtest
             meta_model = None
+            meta_results = {}
             try:
-                logger.log("Predictive", "INFO", "Step 4: Training Meta-model on dedicated Meta-Fold")
-                # Get predictions from Primary model on the Meta Train fold
+                logger.log("Predictive", "INFO", "Step 4: Training Meta-model using Backtest Engine")
+                
+                # Get Primary predictions on the Meta fold
                 p_meta_input = model.predict(X_train_meta)
-                
-                # Define meta-labels: Did the primary prediction result in a "correct" direction?
-                if is_classification:
-                    # Correct if prediction matches target regime
-                    # (Simplified: if pred * target > 0, but regimes are [-1, 0, 1])
-                    y_meta = (p_meta_input == y_train_meta).astype(int)
+                p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
+                if not is_classification:
+                    p_meta_signals = np.sign(p_meta_signals)
+                                
+                if len(tickers) == 1:
+                    logger.log("Predictive", "INFO", "Single symbol detected, using BacktestEngine for meta-labels")
+                    ticker = tickers[0]
+                    full_df = manager.load_data(ticker, interval)
+                    if 'open_time' in full_df.columns:
+                        full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
+                    
+                    # Align df to meta-fold
+                    meta_df = full_df.reindex(X_train_meta.index)
+                    
+                    # Calculate volatility for TP/SL
+                    # Use rolling std of log returns, annualized or just raw for the engine
+                    returns = np.log(full_df['close'] / full_df['close'].shift(1))
+                    volatility = returns.rolling(window=input.vol_window()).std().reindex(X_train_meta.index).fillna(0.01)
+                    bt_engine = BacktestEngine(tp_multiplier=input.upper_mult(), sl_multiplier=input.lower_mult(), min_holding_bar=2, max_holding_bar=input.max_holding())
+                    y_meta = bt_engine.generate_meta_labels(
+                        df=meta_df,
+                        primary_signals=p_meta_signals,
+                        volatility=volatility,
+                        position_size=pd.Series(1.0, index=X_train_meta.index)
+                    )
+                    # Convert outcomes (1, -1) to binary (1 for profit, 0 for loss/no trade)
+                    y_meta = (y_meta == 1).astype(int)
                 else:
-                    # For regression: meta-label = 1 if result same sign as prediction
-                    y_meta = (np.sign(p_meta_input) * np.sign(y_ret_meta) > 0.00001).astype(int)
-                
+                    logger.log("Predictive", "INFO", "Multiple symbols: using naive meta-labels (sign match)")
+                    if is_classification:
+                        y_meta = (p_meta_input == y_train_meta).astype(int)
+                    else:
+                        y_meta = (np.sign(p_meta_input) * np.sign(y_ret_meta) > 0.0000).astype(int)
+
                 # Meta features = original features + primary prediction
                 meta_features = pd.concat([X_train_meta, pd.Series(p_meta_input, index=X_train_meta.index, name='primary_pred')], axis=1)
-                # meta_model = LogisticRegression(max_iter=1000)
-                meta_model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                meta_model = LogisticRegression(max_iter=1000)
                 meta_model.fit(meta_features, y_meta)
                 logger.log("Predictive", "INFO", "Meta-model training complete")
+                
+                # 4.1 Run Sophisticated Backtest on TEST SET
+                logger.log("Predictive", "INFO", "Step 4.1: Running Backtest on Test Set")
+                if len(tickers) == 1:
+                    ticker = tickers[0]
+                    full_df = manager.load_data(ticker, interval)
+                    if 'open_time' in full_df.columns:
+                        full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
+                    
+                    test_df_ohlcv = full_df.reindex(X_test.index)
+                    returns_all = np.log(full_df['close'] / full_df['close'].shift(1))
+                    vol_test = returns_all.rolling(window=input.vol_window()).std().reindex(X_test.index).fillna(0.005)
+                    
+                    # RAW signals backtest
+                    p_test_input = model.predict(X_test)
+                    p_test_signals = pd.Series(p_test_input, index=X_test.index)
+                    if not is_classification:
+                        p_test_signals = np.sign(p_test_signals)
+                    
+                    bt_engine = BacktestEngine()
+                    _, raw_metrics, raw_equity, _, raw_sig, raw_size = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(1.0, index=X_test.index))
+                    
+                    # META signals backtest
+                    meta_test_features = pd.concat([X_test, pd.Series(p_test_input, index=X_test.index, name='primary_pred')], axis=1)
+                    meta_probs = meta_model.predict_proba(meta_test_features)
+                    idx_1 = np.where(meta_model.classes_ == 1)[0]
+                    if len(idx_1) > 0:
+                        probs = meta_probs[:, idx_1[0]]
+                        # Sizing logic: (2*p - 1) * 2 clipped to [-1, 1]
+                        meta_sizing = np.clip((2 * probs - 1), -1, 1)
+                    else:
+                        meta_sizing = np.zeros(len(X_test))
+                    
+                    trade_results, metrics, equity_curve, buy_hold_equity, sig_hist, size_hist = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(meta_sizing, index=X_test.index))
+                    
+                    meta_results = {
+                        'raw_metrics': raw_metrics,
+                        'raw_equity': raw_equity,
+                        'raw_sig': raw_sig,
+                        'raw_size': raw_size,
+                        'meta_metrics': metrics,
+                        'meta_equity': equity_curve,
+                        'meta_sig': sig_hist,
+                        'meta_size': size_hist,
+                        'buy_hold_equity': buy_hold_equity,
+                    }
+
             except Exception as e:
-                logger.log("Predictive", "WARNING", f"Meta-sizing failed (skipping): {str(e)}")
+                logger.log("Predictive", "WARNING", f"Meta-sizing/Backtest failed: {str(e)}")
+                import traceback
+                logger.log("Predictive", "DEBUG", traceback.format_exc())
             
             # 5. Store Results
             logger.log("Predictive", "INFO", "Step 5: Storing results")
             results.set({
                 'model': model,
                 'meta_model': meta_model,
+                'meta_results': meta_results,
                 'X_train_primary': X_train_primary,
                 'y_train_primary': y_train_primary,
                 'y_ret_primary': y_ret_primary,
@@ -915,8 +1201,9 @@ def predictive_server(input, output, session):
 
     @reactive.calc
     def labeling_result():
-        # Trigger ONLY on button click
+        # Trigger ONLY on button click or programmatic trigger
         input.btn_run_labeling()
+        label_trigger.get()
         
         with reactive.isolate():
             # Get basics from UI inputs
@@ -975,6 +1262,9 @@ def predictive_server(input, output, session):
                             max_holding=input.max_holding()
                         )
                         y_series = lobj.label(prices)['label']
+                    elif l_type == "TailSet":
+                        lobj = TailSetLabeler(ret_window=input.tail_window(), threshold=input.tail_threshold())
+                        y_series = lobj.label(prices)['label']
                     else: # Regime
                         lobj = StationarityLabeler(window=input.stat_window(), vote_th=input.vote_th())
                         y_series, _ = lobj.label(prices)
@@ -988,6 +1278,40 @@ def predictive_server(input, output, session):
                     y_series = pd.Series(np.log(prices_arr[1:] / prices_arr[:-1]), index=df.index[1:]).rolling(window=fwd_window).sum().shift(-fwd_window)
                 
                 y_series.index = df.index
+                
+                # Store in cache
+                if is_classification:
+                    cache_key = f"{ticker}_{interval}_{b_type}_{l_type}"
+                    l_params_for_cache = {
+                        'type': l_type,
+                        'amp_th': input.amp_th_bps() if l_type in ["Trend", "Combine"] else None,
+                        'max_inactive': input.max_inactive() if l_type in ["Trend", "Combine"] else None,
+                        'vol_window': input.vol_window() if l_type in ["BoxRange", "Combine"] else None,
+                        'upper_mult': input.upper_mult() if l_type in ["BoxRange", "Combine"] else None,
+                        'lower_mult': input.lower_mult() if l_type in ["BoxRange", "Combine"] else None,
+                        'max_holding': input.max_holding() if l_type in ["BoxRange", "Combine"] else None,
+                        'stat_window': input.stat_window() if l_type == "Regime" else None,
+                        'vote_th': input.vote_th() if l_type == "Regime" else None,
+                        'tail_window': input.tail_window() if l_type == "TailSet" else None,
+                        'tail_threshold': input.tail_threshold() if l_type == "TailSet" else None
+                    }
+                else:
+                    cache_key = f"{ticker}_{interval}_{b_type}_regression_{fwd_window}"
+                    l_params_for_cache = {"fwd_window": fwd_window}
+                
+                cache = labeled_data.get()
+                cache[cache_key] = {
+                    "df": df,
+                    "y": y_series,
+                    "ticker": ticker,
+                    "interval": interval,
+                    "bar_type": b_type,
+                    "is_classification": is_classification,
+                    "params": l_params_for_cache
+                }
+                labeled_data.set(cache)
+                print(f"✓ Stored labels in cache with key: {cache_key}")
+                
                 return {"df": df, "y": y_series, "ticker": ticker, "is_classification": is_classification}
             except Exception as e:
                 logger.log("Predictive", "ERROR", f"Labeling calculation error: {e}")
@@ -1042,7 +1366,6 @@ def predictive_server(input, output, session):
                     ))
 
         fig.update_layout(
-            title=f"Labeling Preview: {ticker}",
             template="plotly_dark",
             height=400,
             margin=dict(t=40, b=60, l=30, r=30),
@@ -1073,13 +1396,23 @@ def predictive_server(input, output, session):
                 "Count": counts.values,
                 "Percentage": (counts.values / len(y) * 100).round(1)
             })
+        if res['is_classification']:
+            summary.set_index("Label", inplace=True)
+            styled = (
+                summary.style
+                .format({"Count": "{:.0f}", "Percentage": "{:.1f}%"})
+                .set_properties(**{"font-size": "14px", "text-align": "center"})
+                .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+            )
         else:
-            summary = pd.DataFrame({
-                "Metric": ["Total Samples", "Mean Forward Ret", "Std Forward Ret"],
-                "Value": [f"{len(y)}", f"{y.mean():.4f}", f"{y.std():.4f}"]
-            })
+            summary.set_index("Metric", inplace=True)
+            styled = (
+                summary.style
+                .set_properties(**{"font-size": "14px", "text-align": "center"})
+                .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+            )
             
-        return summary
+        return styled
 
     @render.ui
     def kpi_row():
@@ -1134,13 +1467,8 @@ def predictive_server(input, output, session):
                 "F1-Score": "{:.1%}",
                 "Support": "{:.0f}"
             })
-            .set_properties(**{
-                "font-size": "14px",
-                "text-align": "center"
-            })
-            .set_table_styles([
-                {"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}
-            ])
+            .set_properties(**{"font-size": "14px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
         )
         return styled
 
@@ -1196,7 +1524,8 @@ def predictive_server(input, output, session):
                             probs = meta_model.predict_proba(X_m)[0]
                             idx_1 = np.where(meta_model.classes_ == 1)[0]
                             meta_size = probs[idx_1[0]] if len(idx_1) > 0 else (1.0 if meta_model.classes_[0] == 1 else 0.0)
-
+                            meta_size = (2 * meta_size - 1) * 2
+                            meta_size = np.clip(meta_size, -1, 1)
                         row = {"Ticker": sym, "Price": f"{latest_price:,.2f}", "Sizing": f"{meta_size:.1%}"}
                         if is_classification:
                             mapping = {1: "UP", -1: "DOWN", 0: "SIDEWAYS"}
@@ -1220,13 +1549,8 @@ def predictive_server(input, output, session):
         df.set_index("Ticker", inplace=True)
         styled = (
             df.style
-            .set_properties(**{
-                "font-size": "14px",
-                "text-align": "center"
-            })
-            .set_table_styles([
-                {"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}
-            ])
+            .set_properties(**{"font-size": "14px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
         )
         return styled
 
@@ -1238,6 +1562,59 @@ def predictive_server(input, output, session):
         res = results.get()
         if res is None: return None
         
+        meta_results = res.get('meta_results', {})
+        
+        # If we have sophisticated backtest results, use them
+        if meta_results:
+            raw_equity = meta_results['raw_equity']
+            meta_equity = meta_results['meta_equity']
+            raw_size = meta_results['raw_size']
+            meta_size = meta_results['meta_size']
+            buy_hold_equity = meta_results['buy_hold_equity']
+            
+            # Align indices 
+            plot_df = pd.DataFrame({
+                'Raw Equity': raw_equity,
+                'Meta Equity': meta_equity,
+                'BnH Equity': buy_hold_equity,
+                'Raw Size': raw_size,
+                'Meta Size': meta_size,
+            }).fillna(method='ffill')
+            
+            # Ensure index is datetime for proper Plotly handling
+            if not isinstance(plot_df.index, pd.DatetimeIndex):
+                plot_df.index = pd.to_datetime(plot_df.index)
+
+            plot_df.index = plot_df.index.strftime('%Y-%m-%d %H:%M')
+
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.08,
+                row_heights=[0.6, 0.4]
+            )
+            
+            # Row 1: Equity Curves
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Raw Equity'] / plot_df['Raw Equity'].iloc[0] - 1, name="Raw Signal PnL", line=dict(color="#9AA0A6", width=3)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Meta Equity'] / plot_df['Meta Equity'].iloc[0] - 1, name="Meta Optimized PnL", line=dict(color="#00E5A8", width=3)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BnH Equity'] / plot_df['BnH Equity'].iloc[0] - 1, name="Buy & Hold PnL", line=dict(color="#FFD700", width=2, dash='dot')), row=1, col=1)
+            
+            # Row 2: Signals and Sizes from Backtest
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Raw Size'], name="Raw Size", line=dict(color="#9AA0A6", width=1.5), opacity=0.5), row=2, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Meta Size'], name="Meta Size", line=dict(color="#4cc9f0", width=1.5)), row=2, col=1)
+            
+            fig.update_layout(
+                height=500,
+                template="plotly_dark",
+                margin=dict(t=40, b=60, l=40, r=30),
+                yaxis_tickformat=".1%",
+                legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
+            )
+            fig.update_yaxes(title_text="Cumulative PnL", row=1, col=1)
+            fig.update_yaxes(title_text="Signal / Size", row=2, col=1)
+            return fig
+
+        # Fallback to naive backtest
         model = res['model']
         X_test = res['X_test']
         y_ret_test = res['y_ret_test']
@@ -1256,7 +1633,8 @@ def predictive_server(input, output, session):
             if len(idx_1) > 0:
                 meta_sizing = probs[:, idx_1[0]]
 
-        bt['Size'] = 2*meta_sizing - 1
+        bt['Size'] = (2 * meta_sizing - 1)
+        bt['Size'] = np.clip(bt['Size'], -1, 1)
         bt['Signal'] = np.sign(bt['Pred']) if not is_classification else bt['Pred']
 
         if is_classification:
@@ -1317,6 +1695,7 @@ def predictive_server(input, output, session):
         fig.update_layout(
             height=450,
             template="plotly_dark",
+            autosize=False,
             margin=dict(t=40, b=60, l=40, r=30),
             yaxis_tickformat=".1%",
             legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5)
@@ -1334,13 +1713,26 @@ def predictive_server(input, output, session):
         
         test_df = res['X_test']
         model = res['model']
+        meta_model = res['meta_model']
         is_classification = res['is_classification']
         
         if not is_classification or len(test_df) == 0:
             return None # Or a message
             
         # 1. Predict on Test Set
-        preds = model.predict(test_df)
+        primary_preds = model.predict(test_df)
+        
+        # Add primary_pred as a feature for the meta-model
+        X_meta = pd.concat([test_df, pd.Series(primary_preds, index=test_df.index, name='primary_pred')], axis=1)
+        
+        meta_probs = meta_model.predict_proba(X_meta)
+        idx_1 = np.where(meta_model.classes_ == 1)[0]
+        if len(idx_1) > 0:
+            probs_meta = meta_probs[:, idx_1[0]]
+            # Map logic: if prob < 0.5, flip signal
+            true_pred = np.where(probs_meta < 0.5, primary_preds * -1, primary_preds)
+        else:
+            true_pred = primary_preds
         
         # 2. Get Price Data for the test set period
         # Since we only support one ticker for classification, we can load it
@@ -1354,7 +1746,7 @@ def predictive_server(input, output, session):
             
         # Filter full_df to match test_df index
         plot_df = full_df.loc[test_df.index].copy()
-        plot_df['pred'] = preds
+        plot_df['pred'] = true_pred
         plot_df.index = plot_df.index.strftime('%Y-%m-%d %H:%M')
         
         fig = go.Figure()
@@ -1379,6 +1771,7 @@ def predictive_server(input, output, session):
             title=f"Predicted Labels on Test Set: {ticker}",
             template="plotly_dark",
             height=400,
+            autosize=False,
             margin=dict(t=50, b=80, l=40, r=40),
             xaxis_title="Time",
             yaxis_title="Price",
@@ -1392,71 +1785,92 @@ def predictive_server(input, output, session):
         if res is None:
             return None
         
-        model = res['model']
-        X_test = res['X_test']
-        y_ret_test = res['y_ret_test']
-        meta_model = res['meta_model']
-        is_classification = res['is_classification']
-        
-        p = model.predict(X_test)
-        
-        bt = pd.DataFrame({
-            'Pred': p,
-            'Ret': y_ret_test
-        }, index=X_test.index).sort_index()
-        
-        meta_sizing = np.ones(len(bt))
-        
-        if meta_model is not None:
-            X_meta = pd.concat([
-                X_test,
-                pd.Series(p, index=X_test.index, name='primary_pred')
-            ], axis=1)
+        meta_results = res.get('meta_results', {})
+        if meta_results:
+            raw_m = meta_results['raw_metrics']
+            meta_m = meta_results['meta_metrics']
             
-            probs = meta_model.predict_proba(X_meta)
-            idx_1 = np.where(meta_model.classes_ == 1)[0]
-            if len(idx_1) > 0:
-                meta_sizing = probs[:, idx_1[0]]
-        
-        if is_classification:
-            bt['Raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0) + np.where(bt['Pred'] == -1, -bt['Ret'], 0)
-        else:
-            bt['Raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0) + np.where(bt['Pred'] < 0, -bt['Ret'], 0)
-        
-        # Use 2*p - 1 scaling to match pnl_plot logic (Signal Reversal/Probabilistic Sizing)
-        bt['Meta'] = bt['Raw'] * (meta_sizing - 0.5) * 4
-        bt['Meta'] = np.clip(bt['Meta'], -1, 1)
-        
-        def get_stats(series, label):
-            ret = series
-            equity = np.exp(ret.cumsum())
-            
-            total_ret = equity.iloc[-1] - 1
-            active = ret[ret != 0]
-            win_rate = (active > 0).sum() / len(active) if len(active) > 0 else 0
-            
-            # Use dynamic annualization factor based on interval
-            ann_factor = MetricsEngine.get_annual_scaling(res['interval'])
-            sharpe = (ret.mean() / ret.std()) * np.sqrt(ann_factor) if ret.std() > 1e-9 else 0
-            
-            roll_max = equity.cummax()
-            dd = (equity / roll_max) - 1
-            max_dd = dd.min()
-            
-            return {
-                "Strategy": label,
-                "Total Profits": total_ret,
-                "Win Rate": win_rate,
-                "Trades": len(active) if label != "Benchmark" else 0,
-                "Sharpe": sharpe,
-                "Max Drawdown": max_dd
+            # For benchmark stats, we'll use naive calc on y_ret_test
+            y_ret_test = res['y_ret_test']
+            equity_bench = np.exp(y_ret_test.cumsum())
+            bench_m = {
+                "Strategy": "Benchmark",
+                "Total Profits": equity_bench.iloc[-1] - 1,
+                "Win Rate": (y_ret_test > 0).sum() / len(y_ret_test) if len(y_ret_test) > 0 else 0,
+                "Trades": 0,
+                "Sharpe": (y_ret_test.mean() / y_ret_test.std() * np.sqrt(MetricsEngine.get_annual_scaling(res['interval']))) if y_ret_test.std() > 1e-9 else 0,
+                "Max Drawdown": ((equity_bench / equity_bench.cummax()) - 1).min()
             }
-        
-        df = pd.DataFrame([
-            get_stats(bt['Raw'], "Raw Signal"),
-            get_stats(bt['Meta'], "Meta Optimized"),
-            get_stats(bt['Ret'], "Benchmark")
-        ])
+
+            df = pd.DataFrame([
+                {
+                    "Strategy": "Raw Signal",
+                    "Total Profits": raw_m['total_return'],
+                    "Win Rate": raw_m['win_rate'],
+                    "Trades": raw_m['total_trades'],
+                    "Sharpe": raw_m['sharpe_ratio'],
+                    "Max Drawdown": raw_m['max_drawdown']
+                },
+                {
+                    "Strategy": "Meta Optimized",
+                    "Total Profits": meta_m['total_return'],
+                    "Win Rate": meta_m['win_rate'],
+                    "Trades": meta_m['total_trades'],
+                    "Sharpe": meta_m['sharpe_ratio'],
+                    "Max Drawdown": meta_m['max_drawdown']
+                },
+                bench_m
+            ])
+        else:
+            # Fallback to naive metrics
+            model = res['model']
+            X_test = res['X_test']
+            y_ret_test = res['y_ret_test']
+            meta_model = res['meta_model']
+            is_classification = res['is_classification']
+            
+            p = model.predict(X_test)
+            bt = pd.DataFrame({'Pred': p, 'Ret': y_ret_test}, index=X_test.index).sort_index()
+            
+            meta_sizing = np.ones(len(bt))
+            if meta_model is not None:
+                X_meta = pd.concat([X_test, pd.Series(p, index=X_test.index, name='primary_pred')], axis=1)
+                probs = meta_model.predict_proba(X_meta)
+                idx_1 = np.where(meta_model.classes_ == 1)[0]
+                if len(idx_1) > 0:
+                    meta_sizing = probs[:, idx_1[0]]
+            
+            if is_classification:
+                bt['Raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0) + np.where(bt['Pred'] == -1, -bt['Ret'], 0)
+            else:
+                bt['Raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0) + np.where(bt['Pred'] < 0, -bt['Ret'], 0)
+            
+            bt['Meta'] = bt['Raw'] * (meta_sizing - 0.5) * 4
+            bt['Meta'] = np.clip(bt['Meta'], -1, 1)
+            
+            def get_stats(series, label):
+                ret = series
+                equity = np.exp(ret.cumsum())
+                total_ret = equity.iloc[-1] - 1
+                active = ret[ret != 0]
+                win_rate = (active > 0).sum() / len(active) if len(active) > 0 else 0
+                ann_factor = MetricsEngine.get_annual_scaling(res['interval'])
+                sharpe = (ret.mean() * ann_factor / (ret.std() * np.sqrt(ann_factor))) if ret.std() > 1e-9 else 0
+                max_dd = ((equity / equity.cummax()) - 1).min() * -1 * 100
+                return {
+                    "Strategy": label,
+                    "Total Profits": total_ret,
+                    "Win Rate": win_rate,
+                    "Trades": len(active) if label != "Benchmark" else 0,
+                    "Sharpe": sharpe,
+                    "Max Drawdown": max_dd
+                }
+            
+            df = pd.DataFrame([
+                get_stats(bt['Raw'], "Raw Signal"),
+                get_stats(bt['Meta'], "Meta Optimized"),
+                get_stats(bt['Ret'], "Benchmark")
+            ])
         
         df = df.sort_values("Sharpe", ascending=False).reset_index(drop=True)
         df.set_index("Strategy", inplace=True)
@@ -1468,17 +1882,11 @@ def predictive_server(input, output, session):
                 "Win Rate": "{:.1%}",
                 "Trades": "{:.0f}",
                 "Sharpe": "{:.2f}",
-                "Max Drawdown": "{:.2%}"
+                "Max Drawdown": "{:.2f}%"
             })
-            .set_properties(**{
-                "font-size": "13px",
-                "text-align": "center"
-            })
-            .set_table_styles([
-                {"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}
-            ])
+            .set_properties(**{"font-size": "13px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}])
         )
-        
         return styled
 
     @render_widget
@@ -1521,7 +1929,7 @@ def predictive_server(input, output, session):
             fig.update_layout(
                 template="plotly_dark",
                 height=200,
-                autosize=True,
+                autosize=False,
                 margin=dict(t=18, b=2, l=2, r=2),
                 dragmode=False
             )
@@ -1557,7 +1965,7 @@ def predictive_server(input, output, session):
         fig.update_layout(
             template="plotly_dark",
             height=200,
-            autosize=True,
+            autosize=False,
             margin=dict(t=18, b=2, l=2, r=2),
             dragmode=False
         )
@@ -1608,7 +2016,7 @@ def predictive_server(input, output, session):
         fig.update_layout(
             template="plotly_dark",
             height=200,
-            autosize=True,
+            autosize=False,
             margin=dict(t=18, b=2, l=2, r=2),
             dragmode=False
         )
@@ -1648,21 +2056,13 @@ def predictive_server(input, output, session):
         total = summary["Count"].sum()
         summary["Pct"] = ((summary["Count"] / total) * 100).round(1)
         summary.set_index("Regime", inplace=True)
+        
         styled = (
             summary.style
-            .format({
-                "Count": "{:.0f}",
-                "Pct": "{:.1f}%",
-            })
-            .set_properties(**{
-                "font-size": "14px",
-                "text-align": "center"
-            })
-            .set_table_styles([
-                {"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}
-            ])
+            .format({"Count": "{:.0f}", "Pct": "{:.1f}%"})
+            .set_properties(**{"font-size": "14px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
         )
-
         return styled
 
 
@@ -1688,22 +2088,13 @@ def predictive_server(input, output, session):
         total = summary["Count"].sum()
         summary["Pct"] = ((summary["Count"] / total) * 100).round(1)
         summary.set_index("Regime", inplace=True)
-
+        
         styled = (
             summary.style
-            .format({
-                "Count": "{:.0f}",
-                "Pct": "{:.1f}%",
-            })
-            .set_properties(**{
-                "font-size": "14px",
-                "text-align": "center"
-            })
-            .set_table_styles([
-                {"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}
-            ])
+            .format({"Count": "{:.0f}", "Pct": "{:.1f}%"})
+            .set_properties(**{"font-size": "14px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
         )
-
         return styled
 
     @render_widget
@@ -1729,8 +2120,8 @@ def predictive_server(input, output, session):
         
         fig.update_layout(
             template="plotly_dark",
-            height=350,
-            margin=dict(t=30, b=40, l=40, r=40),
+            height=400,
+            margin=dict(t=40, b=60, l=30, r=30),
             legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
             xaxis_title="Log Returns",
             yaxis_title="Density"
@@ -1758,8 +2149,9 @@ def predictive_server(input, output, session):
                 
         fig.update_layout(
             template="plotly_dark",
-            height=350,
-            margin=dict(t=30, b=40, l=40, r=40),
+            height=400,
+            autosize=False,
+            margin=dict(t=40, b=60, l=30, r=30),
             legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
             xaxis_title=None,
             yaxis_title="Cumulative Log Return"
@@ -1792,10 +2184,17 @@ def predictive_server(input, output, session):
                     })
                     
         if not stats_list: return None
-        df_stats = pd.DataFrame(stats_list).set_index("Type")
         
+        df_stats = pd.DataFrame(stats_list)
+
         # Round columns
         for col in ["Mean", "Std", "Min", "Max", "Skew", "Kurtosis"]:
             df_stats[col] = df_stats[col].map(lambda x: f"{x:.5f}")
             
-        return df_stats.reset_index()
+        df_stats.set_index("Type", inplace=True)
+        styled = (
+            df_stats.style
+            .set_properties(**{"font-size": "13px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}])
+        )
+        return styled
