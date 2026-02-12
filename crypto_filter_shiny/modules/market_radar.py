@@ -27,8 +27,17 @@ def market_radar_ui():
                     ui.input_select(
                         "radar_interval",
                         "Interval",
-                        choices=AVAILABLE_INTERVALS,
-                        selected="1d"
+                        selected="1d",
+                        choices=AVAILABLE_INTERVALS
+                    ),
+
+                    ui.input_numeric(
+                        "filter_window",
+                        "Window Size",
+                        value=40,
+                        min=5,
+                        max=500,
+                        step=5
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -69,6 +78,13 @@ def market_radar_ui():
                         "drop_zeros",
                         "Exclude Zero Metrics",
                         value=True
+                    ),
+                    ui.input_selectize(
+                        "exclude_symbols",
+                        "Exclude Symbols",
+                        choices=[],
+                        selected=[],
+                        multiple=True
                     )
                 ),
                 ui.div(
@@ -207,6 +223,13 @@ def market_radar_server(input, output, session, global_interval):
     logger.log("Market Radar", "INFO", "Server initialized")
 
     @reactive.effect
+    def _():
+        interval = input.radar_interval()
+        inventory = manager.get_inventory()
+        available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+        ui.update_selectize("exclude_symbols", choices=available_syms, selected=input.exclude_symbols())
+
+    @reactive.effect
     @reactive.event(input.btn_calc_snapshot)
     async def _():
         logger.log("Market Radar", "INFO", "Snapshot calculation triggered")
@@ -234,6 +257,10 @@ def market_radar_server(input, output, session, global_interval):
                 
                 results = []
                 for i, sym in enumerate(symbols):
+                    sym = sym if sym not in input.exclude_symbols() else None
+                    if sym is None:
+                        continue
+
                     df = manager.load_data(sym, interval)
                     if df is not None and not df.empty:
                         # Compute metrics for this symbol alone
@@ -245,7 +272,8 @@ def market_radar_server(input, output, session, global_interval):
                                 {sym: df}, 
                                 interval=interval, 
                                 benchmark_symbol=BENCHMARK_SYMBOL,
-                                benchmark_returns=benchmark_returns
+                                benchmark_returns=benchmark_returns,
+                                window=input.filter_window()
                             )
                             if not single_res.empty:
                                 results.append(single_res.iloc[0])

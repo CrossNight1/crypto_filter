@@ -383,6 +383,15 @@ input:focus {
     color: var(--bg-blue) !important;
 }
 
+.selectize-control.single .selectize-input:after {
+    border-top-color: var(--primary-orange) !important;
+}
+
+.selectize-control.single .selectize-input.dropdown-active:after {
+    border-top-color: transparent !important;
+    border-bottom-color: var(--primary-orange) !important;
+}
+
 /* =========================
    BUTTONS (BLUE ON ORANGE)
 ========================= */

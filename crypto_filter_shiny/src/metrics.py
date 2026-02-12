@@ -474,6 +474,64 @@ class MetricsEngine:
         return float((mean_ret / std_ret) * np.sqrt(ann_factor))
 
     @staticmethod
+    def calculate_sortino_ratio(log_returns: np.ndarray, target: float = 0.0, interval: str = '1h') -> float:
+        """
+        Sortino Ratio = (Mean Return - Target) / Downside Deviation
+        """
+        if len(log_returns) < 2: return 0.0
+        
+        excess_returns = log_returns - target
+        downside_returns = excess_returns[excess_returns < 0]
+        
+        if len(downside_returns) == 0:
+            return float('inf') if np.mean(excess_returns) > 0 else 0.0
+            
+        downside_std = np.std(downside_returns)
+        if downside_std < 1e-9: return 0.0
+        
+        mean_ret = np.mean(excess_returns)
+        ann_factor = MetricsEngine.get_annual_scaling(interval)
+        
+        return float((mean_ret / downside_std) * np.sqrt(ann_factor))
+
+    @staticmethod
+    def calculate_max_drawdown(prices: np.ndarray) -> float:
+        """
+        Max Drawdown = Min((Price / RunningMax) - 1)
+        """
+        if len(prices) < 2: return 0.0
+        
+        running_max = np.maximum.accumulate(prices)
+        drawdowns = (prices / running_max) - 1
+        return float(np.min(drawdowns))
+
+    @staticmethod
+    def calculate_avg_drawdown(prices: np.ndarray) -> float:
+        """
+        Average of all drawdowns (where DD < 0)
+        """
+        if len(prices) < 2: return 0.0
+        
+        running_max = np.maximum.accumulate(prices)
+        drawdowns = (prices / running_max) - 1
+        
+        # Filter for actual drawdowns
+        negative_dds = drawdowns[drawdowns < 0]
+        if len(negative_dds) == 0: return 0.0
+        
+        return float(np.mean(negative_dds))
+
+    @staticmethod
+    def calculate_win_rate(log_returns: np.ndarray) -> float:
+        """
+        Percentage of positive returns.
+        """
+        if len(log_returns) == 0: return 0.0
+        
+        wins = np.sum(log_returns > 0)
+        return float(wins / len(log_returns))
+
+    @staticmethod
     def calculate_rolling_metric(df: pd.DataFrame, metric_name: str, window: int = 30, step: int = 1, benchmark_returns: pd.Series = None, interval: str = '1h') -> pd.Series:
         """
         Calculates a metric over a rolling window.
@@ -547,7 +605,7 @@ class MetricsEngine:
             
         return res
 
-    def compute_all_metrics(self, prices_data: Dict[str, pd.DataFrame], interval: str = '1h', benchmark_symbol: str = 'BTCUSDT', benchmark_returns: Optional[pd.Series] = None) -> pd.DataFrame:
+    def compute_all_metrics(self, prices_data: Dict[str, pd.DataFrame], interval: str = '1h', benchmark_symbol: str = 'BTCUSDT', benchmark_returns: Optional[pd.Series] = None, window: int = 40) -> pd.DataFrame:
         """
         Main pipeline to compute metrics for all symbols.
         """
@@ -597,7 +655,7 @@ class MetricsEngine:
                 
                 # 3. ADVANCED METRICS (The 11 new ones)
                 # Calculate all and take the LATEST value for the snapshot
-                adv_df = self.calculate_all_indicators(df, benchmark_returns=benchmark_returns)
+                adv_df = self.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns)
                 latest_adv = adv_df.iloc[-1].to_dict()
                 
                 # 4. Old Custom ADF (Keeping for compatibility)

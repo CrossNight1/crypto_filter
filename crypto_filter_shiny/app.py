@@ -20,6 +20,11 @@ from modules.market_radar import market_radar_ui, market_radar_server
 from modules.predictive import predictive_ui, predictive_server
 from modules.multivariate_analysis import multivariate_analysis_ui, multivariate_analysis_server
 from modules.activity_logs import activity_logs_ui, activity_logs_server
+from modules.symbol_diagnostics import symbol_diagnostics_ui, symbol_diagnostics_server
+from src.data import DataManager
+from src.metrics import MetricsEngine
+from src.config import BENCHMARK_SYMBOL
+from datetime import datetime
 
 # UI definition
 app_ui = ui.page_navbar(
@@ -47,6 +52,11 @@ app_ui = ui.page_navbar(
                 ),
                 ui.layout_columns(
                     ui.card(
+                        ui.card_header("Diagnostics"),
+                        ui.p("Deep Quantitative Symbol Diagnostics"),
+                        ui.input_action_button("go_diagnostics", "open_diagnostics", class_="btn-primary w-100")
+                    ),
+                    ui.card(
                         ui.card_header("Market Radar"),
                         ui.p("Real-time relative performance & momentum tracking."),
                         ui.input_action_button("go_radar", "open_radar", class_="btn-primary w-100")
@@ -61,7 +71,7 @@ app_ui = ui.page_navbar(
                         ui.p("ML forecasting with meta-labeling verification protocols."),
                         ui.input_action_button("go_machine_learning", "explore_models", class_="btn-primary w-100")
                     ),
-                    col_widths=[4,4,4]
+                    col_widths=[3,3,3,3]
                 ),
                 class_="hero-container text-center py-5"
             ),
@@ -70,13 +80,15 @@ app_ui = ui.page_navbar(
     ),
 
     ui.nav_panel("DATA_LOADER", data_loader_ui()),
+    ui.nav_panel("DIAGNOSTICS", symbol_diagnostics_ui()),
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
     ui.nav_panel("MACHINE_LEARNING", predictive_ui()),
     ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
     ui.nav_spacer(),
-
+    ui.nav_control(ui.output_ui("data_status_")),
+    ui.nav_spacer(),
     ui.nav_control(
         ui.div(
             ui.input_text("quick_symbol", None, placeholder="Enter Symbol (e.g. BTCUSDT) ", width="250px"),
@@ -90,6 +102,38 @@ app_ui = ui.page_navbar(
 def server(input, output, session):
     # Shared global state if needed
     global_interval = reactive.Value("1d")
+    manager = DataManager()
+    engine = MetricsEngine()
+    
+    diag_data = reactive.Value({})
+    data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"}})
+    
+    def get_timestamps(symbol, interval):
+        df = manager.load_data(symbol, interval)
+        if df is not None and not df.empty and 'open_time' in df.columns:
+            ts = pd.to_datetime(df['open_time'])
+            return {"oldest": str(ts.min()), "latest": str(ts.max())}
+        return {"oldest": "-", "latest": "-"}
+    
+    @reactive.Effect
+    def populate_symbols():
+        inventory = manager.get_inventory()
+        all_syms = sorted(inventory.keys())
+        ui.update_selectize("diag_symbol", choices=all_syms, server=True)
+        
+        # Set benchmark/global timestamps once
+        global_ts = get_timestamps(BENCHMARK_SYMBOL, input.diag_interval())
+        data_info.set({"global": global_ts})
+    
+    @render.ui
+    def data_status_():
+        d = data_info.get()
+        return ui.HTML(f"""
+            <div style="font-size: 0.7rem; opacity: 0.7; color: white;">
+                <div>Global Data: {d['global']['oldest']} - {d['global']['latest']}</div>
+                <div>Current Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</div>
+            </div>
+        """)
     
     @reactive.Effect
     @reactive.event(input.go_machine_learning)
@@ -105,6 +149,11 @@ def server(input, output, session):
     @reactive.event(input.go_multivariate)
     def _go_multivariate():
         ui.update_navset("main_nav", selected="MULTIVARIATE")
+
+    @reactive.Effect
+    @reactive.event(input.go_diagnostics)
+    def _go_diagnostics():
+        ui.update_navset("main_nav", selected="DIAGNOSTICS")
 
     @reactive.Effect
     @reactive.event(input.quick_symbol_enter)
@@ -125,6 +174,7 @@ def server(input, output, session):
     market_radar_server(input, output, session, global_interval)
     predictive_server(input, output, session)
     multivariate_analysis_server(input, output, session)
+    symbol_diagnostics_server(input, output, session, global_interval)
     activity_logs_server(input, output, session)
 
 app = App(app_ui, server)
