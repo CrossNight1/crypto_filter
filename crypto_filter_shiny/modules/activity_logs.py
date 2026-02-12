@@ -10,8 +10,7 @@ def activity_logs_ui():
             ui.input_select("log_level_filter", "Filter by Level", 
                           choices=["ALL", "INFO", "WARNING", "ERROR", "DEBUG"], 
                           selected="ALL"),
-            ui.input_numeric("log_limit", "Max Entries", value=100, min=10, max=1000),
-            title="Log Settings"
+            ui.input_numeric("log_limit", "Max Entries", value=100, min=10, max=1000)
         ),
         ui.div(
             ui.card(

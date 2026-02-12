@@ -1,32 +1,612 @@
+/* www/custom.css */
+
+/* Import Space Mono for that Terminal feel */
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
+
+/* =========================
+   Design System Variables
+========================= */
+:root {
+    --bg-blue: #0b3d91;
+    --panel-blue: #093175;
+    --primary-orange: #FCC780;
+    --text-white: #ffffff;
+    --text-dim: #a0aec0;
+    --border-color: #1a4da3;
+}
+
+/* =========================
+   Global Reset & Defaults
+========================= */
+html,
+body {
+    font-family: 'Space Mono', monospace !important;
+    background-color: var(--bg-blue) !important;
+    color: var(--text-white) !important;
+    margin: 0;
+    line-height: 1.5;
+    font-size: 14px;
+}
+
+/* =========================
+   Typography
+========================= */
+h1,
+h2,
+h3,
+h4,
+h5,
+.main-header {
+    font-family: 'Space Mono', monospace !important;
+    font-weight: 700 !important;
+}
+
 .main-header {
     font-size: 2.5rem;
-    font-weight: 700;
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: var(--primary-orange) !important;
+    text-transform: uppercase;
+    letter-spacing: 2px;
     margin-bottom: 2rem;
+    border-bottom: 2px solid var(--primary-orange);
+    display: inline-block;
+    padding-bottom: 0.5rem;
+}
+
+/* =========================
+   Navbar (High Contrast Terminal)
+========================= */
+.navbar,
+.navbar-default,
+.bg-dark {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 9999 !important;
+    background-color: var(--bg-blue) !important;
+    border-bottom: 3px solid var(--primary-orange) !important;
+    padding: 0.5rem 1rem !important;
+}
+
+.navbar-brand,
+.navbar-title,
+.navbar .nav-link,
+.nav-item>a {
+    color: var(--text-white) !important;
+    font-family: 'Space Mono', monospace !important;
+    font-weight: 700 !important;
+    opacity: 1 !important;
+}
+
+.navbar .nav-link:hover,
+.navbar .nav-link.active,
+.navbar .nav-item.active>a {
+    background-color: var(--primary-orange) !important;
+    color: var(--bg-blue) !important;
+    /* Force blue text on orange background */
+}
+
+/* =========================
+   Sidebar (Terminal Overhaul)
+========================= */
+.bslib-sidebar,
+.sidebar,
+.sidebar-content,
+.bslib-column-sidebar {
+    background-color: var(--panel-blue) !important;
+    border-right: 2px solid var(--border-color) !important;
+    color: var(--text-white) !important;
+    font-family: 'Space Mono', monospace !important;
+}
+
+.bslib-sidebar-title,
+.sidebar-title,
+.sidebar h4,
+.sidebar h5 {
+    color: var(--primary-orange) !important;
+    text-transform: uppercase !important;
+    font-weight: 700 !important;
+    letter-spacing: 1px !important;
+    border-bottom: 2px solid var(--border-color) !important;
+    padding-bottom: 8px !important;
+    margin-bottom: 15px !important;
+    display: block !important;
+}
+
+/* Sidebar Inputs & Labels */
+.sidebar label,
+.sidebar .control-label {
+    color: var(--primary-orange) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    font-size: 0.8rem !important;
+}
+
+/* =========================
+   Minimalist Accordions & UI 
+========================= */
+.accordion-button {
+    background-color: var(--panel-blue) !important;
+    color: var(--primary-orange) !important;
+    font-weight: 700 !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 0 !important;
+}
+
+.accordion-button:not(.collapsed) {
+    background-color: var(--primary-orange) !important;
+    color: var(--bg-blue) !important;
+    border-color: var(--primary-orange) !important;
+}
+
+.accordion-body {
+    background-color: var(--panel-blue) !important;
+    color: var(--text-white) !important;
+    border: 1px solid var(--border-color) !important;
+    border-top: none !important;
+}
+
+/* ================= GLOBAL SWITCH FIX ================= */
+
+/* Remove Bootstrap default spacing */
+.form-check,
+.form-switch {
+    padding-left: 0 !important;
+    margin-left: 0 !important;
+}
+
+/* Wrapper alignment + spacing from text */
+.form-switch {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 10px;
+    /* spacing between toggle and label */
+}
+
+/* Toggle track */
+.form-switch .form-check-input {
+    width: 36px !important;
+    height: 18px !important;
+
+    margin: 0 !important;
+    padding: 0 !important;
+
+    background-color: var(--bg-blue) !important;
+    border: 2px solid var(--border-color) !important;
+
+    border-radius: 0 !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+
+    position: relative !important;
+    overflow: hidden !important;
+    cursor: pointer;
+    box-shadow: none !important;
+    transition: border-color 0.15s ease;
+}
+
+/* Slider square */
+.form-switch .form-check-input::after {
+    content: "";
+    position: absolute;
+
+    top: 2px;
+    left: 2px;
+
+    width: 10px;
+    height: 10px;
+
+    background-color: var(--border-color);
+    transition: left 0.15s ease, background-color 0.15s ease;
+}
+
+/* Checked state */
+.form-switch .form-check-input:checked {
+    border-color: var(--primary-orange) !important;
+    background-color: var(--bg-blue) !important;
+}
+
+.form-switch .form-check-input:checked::after {
+    left: 20px;
+    background-color: var(--primary-orange);
+}
+
+/* Focus state */
+.form-switch .form-check-input:focus {
+    outline: none !important;
+    box-shadow: 0 0 0 1px var(--primary-orange) !important;
+}
+
+/* Label spacing + usability */
+.form-check-label {
+    margin-left: 0 !important;
+    user-select: none;
+    cursor: pointer;
+}
+
+/* =========================
+   Terminal Cards & Containers (Square Borders)
+========================= */
+.card,
+.bslib-card,
+.bslib-card .card-body,
+.bslib-card .card-header,
+.bslib-card .card-footer,
+.accordion-item,
+.accordion-button,
+.navset-card-underline,
+.navset-card-pill,
+.nav-link,
+.btn,
+.form-control,
+.selectize-input,
+.selectize-dropdown {
+    border-radius: 0 !important;
+    box-shadow: none !important;
 }
 
 .card {
-    border-radius: 12px;
-    border: 1px solid #333;
-    background-color: #1e1e1e !important;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    background: var(--panel-blue) !important;
+    border: 1px solid var(--border-color) !important;
+    margin-bottom: 1rem;
+    color: var(--text-white) !important;
 }
 
-html {
-    font-size: 14px;
-    /* Global base font size */
+.card:hover {
+    border-color: var(--primary-orange) !important;
 }
 
-body {
-    font-family: 'Inter', sans-serif;
-    background-color: #121212;
-    font-size: 1rem;
-    /* Inherits from html */
+.card-header {
+    background: var(--border-color) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    color: var(--primary-orange) !important;
+    font-size: 0.9rem;
+    font-weight: 700 !important;
+    padding: 0.6rem 1rem !important;
+    text-transform: uppercase;
 }
 
-.navbar {
-    border-bottom: 1px solid #333;
+/* Ensure text inside cards is white */
+.card p,
+.card h1,
+.card h2,
+.card h3,
+.card h4,
+.card h5,
+.card h6,
+.card li,
+.card label {
+    color: var(--text-white) !important;
+}
+
+/* =========================
+   Interactive Elements
+========================= */
+/* Fix black text in input_text, select, etc. */
+input,
+select,
+textarea,
+.form-control,
+.selectize-control input,
+.selectize-input input {
+    background: var(--bg-blue) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 0 !important;
+    color: var(--text-white) !important;
+    /* PURE WHITE TEXT */
+    font-family: 'Space Mono', monospace !important;
+}
+
+/* Aggressive Selectize targeting */
+.selectize-input,
+.selectize-input.full,
+.selectize-input.focus,
+.selectize-control.single .selectize-input.input-active,
+.selectize-control.multi .selectize-input.has-items {
+    background: var(--bg-blue) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+/* Ensure selected text and placeholder in Selectize are white */
+.selectize-input *,
+.selectize-input>input {
+    color: var(--text-white) !important;
+}
+
+/* =========================
+   Terminal Minimalist Inputs
+========================= */
+
+/* ===== Remove ALL rounding globally ===== */
+* {
+    border-radius: 0 !important;
+}
+
+/* ===== Fix Bootstrap input wrappers ===== */
+.form-control,
+.form-select,
+select,
+input,
+textarea {
+    border-radius: 0 !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+}
+
+/* ===== Remove inner Mac / Chrome select styling ===== */
+select::-ms-expand {
+    display: none;
+}
+
+/* ===== Square styling ===== */
+.form-control,
+.form-select,
+select,
+input {
+    background-color: var(--bg-blue) !important;
+    border: 2px solid var(--border-color) !important;
+    color: var(--text-white) !important;
+    font-family: 'Space Mono', monospace !important;
+}
+
+/* ===== Highlight when active ===== */
+.form-control:focus,
+.form-select:focus,
+select:focus,
+input:focus {
+    border-color: var(--primary-orange) !important;
+    box-shadow: 0 0 0 1px var(--primary-orange) !important;
+    outline: none !important;
+}
+
+/* Labels */
+.form-check-label {
+    color: var(--text-white) !important;
+    font-size: 0.8rem !important;
+    margin-left: 0px !important;
+}
+
+.selectize-control.multi .selectize-input>div {
+    background: var(--primary-orange) !important;
+    color: var(--bg-blue) !important;
+    border: none !important;
+}
+
+.selectize-dropdown,
+.selectize-dropdown-content {
+    background: var(--panel-blue) !important;
+    border: 1px solid var(--primary-orange) !important;
+    color: var(--text-white) !important;
+}
+
+.selectize-dropdown .active {
+    background: var(--primary-orange) !important;
+    color: var(--bg-blue) !important;
+}
+
+/* =========================
+   BUTTONS (BLUE ON ORANGE)
+========================= */
+.btn-primary,
+.action-button.btn-primary,
+button.btn-primary,
+.navset-card-underline .btn-primary,
+.card .btn-primary,
+.bslib-sidebar .btn-primary {
+    background-color: var(--primary-orange) !important;
+    border: 2px solid var(--primary-orange) !important;
+    color: var(--bg-blue) !important;
+    /* BLUE TEXT ON ORANGE */
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    border-radius: 0 !important;
+}
+
+/* Secondary / Standard Action Buttons */
+.btn-secondary,
+.action-button,
+button:not(.btn-primary) {
+    background-color: transparent !important;
+    border: 1px solid var(--primary-orange) !important;
+    color: var(--primary-orange) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    border-radius: 0 !important;
+}
+
+.btn-primary:hover,
+.action-button:hover {
+    background-color: var(--text-white) !important;
+    border-color: var(--text-white) !important;
+    color: var(--bg-blue) !important;
+}
+
+/* =========================
+   ULTIMATE TABLE GRID FIX (NUCLEAR)
+========================= */
+/* Target EVERY possible table/header structure */
+table,
+.table,
+.shiny-datagrid,
+.shiny-data-frame,
+.bq-grid,
+.bslib-card .table,
+.navset-card-underline .table,
+.card-body .table,
+.shiny-output-table table {
+    border: 2px solid var(--border-color) !important;
+    border-collapse: collapse !important;
+    background-color: transparent !important;
+    width: 100% !important;
+}
+
+/* FORCE BLACK TEXT ON ORANGE HEADERS - NO EXCEPTIONS */
+table th,
+.table th,
+thead th,
+.table thead th,
+.shiny-datagrid th,
+.shiny-data-frame th,
+.table-header,
+.bq-grid-header,
+.bslib-card thead th,
+.shiny-data-frame thead th,
+.shiny-data-frame th[role="rowheader"],
+th[role="columnheader"],
+th[role="rowheader"] {
+    background: var(--primary-orange) !important;
+    color: #000000 !important;
+    /* ABSOLUTE BLACK */
+    border: 1px solid var(--border-color) !important;
+    text-transform: uppercase !important;
+    font-weight: 700 !important;
+    padding: 12px 10px !important;
+}
+
+/* Deep target for spans/divs inside headers */
+table th *,
+.table th *,
+thead th *,
+.shiny-data-frame th * {
+    color: #000000 !important;
+    background: transparent !important;
+}
+
+/* GRID BORDERS FOR ALL CELLS */
+table td,
+.table td,
+tbody td,
+.table tbody td,
+.shiny-datagrid td,
+.shiny-data-frame td,
+.shiny-data-frame tbody td,
+td[role="gridcell"] {
+    border: 1px solid var(--border-color) !important;
+    /* VISIBLE GRID */
+    color: var(--text-white) !important;
+    padding: 8px !important;
+}
+
+/* Zebra striping */
+.table-striped>tbody>tr:nth-of-type(odd)>* {
+    background-color: rgba(25, 77, 163, 0.2) !important;
+}
+
+/* =========================
+   Code & Console
+========================= */
+code,
+pre,
+.activity-logs {
+    background: #000000 !important;
+    color: #00ff00 !important;
+    border: 1px solid var(--border-color) !important;
+    padding: 10px;
+    font-family: 'Space Mono', monospace !important;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-blue);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--primary-orange);
+}
+
+/* Breating Cursor */
+.main-header::after {
+    content: '_';
+    animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+    50% {
+        opacity: 0;
+    }
+}
+
+/* =========================
+   ION RANGE SLIDER OVERRIDES (TERMINAL ORANGE)
+========================= */
+
+/* Main Container */
+.irs {
+    font-family: 'Space Mono', monospace !important;
+}
+
+/* Track (Background) */
+.irs-line {
+    background: var(--bg-blue) !important;
+    border: 1px solid var(--border-color) !important;
+    height: 8px !important;
+    top: 33px !important;
+    border-radius: 0 !important;
+}
+
+/* Selected Bar (Active Part) */
+.irs-bar {
+    background: var(--primary-orange) !important;
+    height: 8px !important;
+    top: 33px !important;
+    border-top: 1px solid var(--primary-orange) !important;
+    border-bottom: 1px solid var(--primary-orange) !important;
+}
+
+/* Slider Handle (Knob) - Made "Huger" and Square */
+.irs-handle {
+    width: 20px !important;
+    height: 20px !important;
+    background: var(--primary-orange) !important;
+    border: 2px solid var(--bg-blue) !important;
+    border-radius: 0 !important;
+    top: 27px !important;
+    cursor: pointer !important;
+    box-shadow: 0 0 5px rgba(252, 199, 128, 0.5) !important;
+}
+
+/* Current Value Label (Single) */
+.irs-single {
+    background: var(--primary-orange) !important;
+    color: var(--bg-blue) !important;
+    font-weight: 700 !important;
+    border-radius: 0 !important;
+    padding: 2px 5px !important;
+    font-size: 11px !important;
+}
+
+.irs-single::after {
+    border-top-color: var(--primary-orange) !important;
+}
+
+/* Min/Max Labels */
+.irs-min,
+.irs-max {
+    background: transparent !important;
+    color: var(--text-dim) !important;
+    font-size: 10px !important;
+    border-radius: 0 !important;
+    padding: 1px 3px !important;
+}
+
+/* Grid markings */
+.irs-grid-pol {
+    background: var(--border-color) !important;
+}
+
+.irs-grid-text {
+    color: var(--text-dim) !important;
+    font-family: 'Space Mono', monospace !important;
+}
+
+input::placeholder {
+    color: white !important;
+    opacity: 0.5 !important;
 }

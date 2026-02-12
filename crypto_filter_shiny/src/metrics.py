@@ -198,7 +198,7 @@ class MetricsEngine:
         # 15. Imbalance Bar
         body = (close - df['open']).abs()
         rng = (high - low).abs().replace(0, 1e-9)
-        res['imbalance_bar'] = (body / rng * volume) * np.sign(ret).fillna(0)
+        res['imbalance_bar'] = (body / rng) * np.sign(ret).fillna(0)
         
         # --- Standard/Legacy Metrics for Snapshot/Table use ---
         ann_factor = MetricsEngine.get_annual_scaling(interval)
@@ -493,7 +493,7 @@ class MetricsEngine:
         new_metrics = [
             'ewva', 'aroon_osc', 'bbp', 'rsi_norm', 'return_z', 'atr_norm', 
             'cmf', 'vwap_z', 'rel_strength_z', 'vam', 'skewness',
-            'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar'
+            'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance'
         ]
         
         if metric_name in new_metrics:

@@ -50,7 +50,7 @@ def market_radar_ui():
 
                     ui.input_select(
                         "z_axis",
-                        "Z Axis (Size/Color)",
+                        "Z Axis",
                         choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}},
                         selected=ALL_METRICS[1]
                     ),
@@ -59,8 +59,8 @@ def market_radar_ui():
                     ui.layout_columns(
                         ui.input_checkbox("x_log", "Log X"),
                         ui.input_checkbox("y_log", "Log Y"),
-                        ui.input_checkbox("z_log", "Log Z"),
-                        col_widths=[4, 4, 4]
+                        # ui.input_checkbox("z_log", "Log Z"),
+                        col_widths=[5, 5]
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -136,7 +136,7 @@ def market_radar_ui():
                     ui.layout_columns(
                         ui.input_checkbox("rpg_x_log", "Log X"),
                         ui.input_checkbox("rpg_y_log", "Log Y"),
-                        col_widths=[6, 6]
+                        col_widths=[5, 5]
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -157,7 +157,7 @@ def market_radar_ui():
                             min=1,
                             max=200
                         ),
-                        col_widths=[6, 6]
+                        col_widths=[5, 5]
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -314,7 +314,7 @@ def market_radar_server(input, output, session, global_interval):
             fig = px.scatter(
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
                 hover_name='symbol', log_x=input.x_log(), log_y=input.y_log(),
-                color_continuous_scale='Viridis',
+                color_continuous_scale='Spectral_r',
                 template="plotly_dark"
             )
         else:
@@ -327,8 +327,16 @@ def market_radar_server(input, output, session, global_interval):
         fig.update_layout(
             margin=dict(l=0, r=0, t=30, b=0),
             xaxis_title=METRIC_LABELS.get(x, x),
-            yaxis_title=METRIC_LABELS.get(y, y)
+            yaxis_title=METRIC_LABELS.get(y, y),
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)")
         )
+
+        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
         return fig
 
     @reactive.effect
@@ -432,7 +440,12 @@ def market_radar_server(input, output, session, global_interval):
             showlegend=False,
             margin=dict(l=0, r=0, t=30, b=0),
             xaxis_title=x_label,
-            yaxis_title=y_label
+            yaxis_title=y_label,
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)")
         )
         return fig
 

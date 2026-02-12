@@ -57,18 +57,23 @@ def data_loader_ui():
                         ),
                         col_widths=[3, 9]
                     ),
-
                     ui.layout_columns(
-                        ui.input_radio_buttons("fetch_mode", None, ["Range", "Limit"], inline=True),
-                        ui.panel_conditional(
-                            "input.fetch_mode == 'Range'",
-                            ui.input_numeric("days_back", None, value=30, min=1)
+                        # Column 1 → Fetch mode selector
+                        ui.input_select("fetch_mode", "Fetch Mode", ["Range", "Limit"]),
+                        
+                        # Column 2 → Conditional inputs
+                        ui.div(
+                            ui.panel_conditional(
+                                "input.fetch_mode == 'Range'",
+                                ui.input_numeric("days_back", "Days Back", value=30, min=1)
+                            ),
+                            ui.panel_conditional(
+                                "input.fetch_mode == 'Limit'",
+                                ui.input_numeric("limit", "Limit", value=1000, min=100, step=100)
+                            )
                         ),
-                        ui.panel_conditional(
-                            "input.fetch_mode == 'Limit'",
-                            ui.input_numeric("limit", None, value=1000, min=100, step=100)
-                        ),
-                        col_widths=[2, 3, 3, 4]
+                        
+                        col_widths=[3, 3]
                     ),
 
                     ui.input_action_button(

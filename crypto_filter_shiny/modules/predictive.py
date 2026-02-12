@@ -3,6 +3,7 @@ import faicons as fa
 from shinywidgets import output_widget, render_widget
 import pandas as pd
 import numpy as np
+import shap
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.figure_factory as ff
@@ -16,6 +17,10 @@ from scipy.optimize import minimize
 from scipy.stats import skew, kurtosis
 from numba import njit
 from scipy.stats import probplot
+import matplotlib.pyplot as plt
+import matplotlib
+import plotly.colors as pc
+matplotlib.use('Agg') # Safe for web apps
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
@@ -32,7 +37,7 @@ def predictive_ui():
         ui.sidebar(
             ui.h4("Predictive Analysis"),
             ui.input_action_button("btn_run_analysis", "Run Analysis", class_="btn-primary w-100 mt-3"),
-            ui.input_radio_buttons("analysis_goal", "Analysis Goal", ["Directional", "Return Value"]),
+            ui.input_select("analysis_goal", "Analysis Goal", ["Directional", "Return Value"]),
             ui.output_ui("symbol_selection_ui"),
             ui.input_select("interval", "Interval", choices=["1h", "4h", "1d"]),
             ui.output_ui("model_select_ui"),
@@ -67,33 +72,33 @@ def predictive_ui():
                             4,
                             ui.card(
                                 ui.card_header("Structural Engineering"),
-                                ui.input_action_button(
+                                ui.layout_columns(
+                                    ui.input_action_button(
                                         "btn_run_engineering",
                                         "Apply Engineering",
                                         class_="btn-primary w-100"
                                     ),
-                                ui.input_action_button(
+                                    ui.input_action_button(
                                         "btn_auto_calibrate",
-                                        "Auto Calibrate Thresholds",
-                                        class_="btn-outline-success w-100 mt-2"
-                                    ),
+                                        "Auto Calibrate",
+                                        class_="btn-primary w-100"
+                                    )
+                                ),
                                 ui.layout_columns(
                                     ui.h6("Volume Threshold"),
                                     ui.input_numeric("vol_bar_th", None, value=10000, min=1),
-                                    col_widths=[4, 5, 3]
+                                    col_widths=[6, 6]
                                 ),
                                 ui.layout_columns(
                                     ui.h6("Dollar Threshold"),
                                     ui.input_numeric("dollar_bar_th", None, value=1000000000, min=1),
-                                    col_widths=[4, 5, 3]
+                                    col_widths=[6, 6]
                                 ),
-                                ui.markdown("---"),
                                 ui.layout_columns(
                                     ui.h6("Structure Analysis"),
-                                    ui.input_select("bar_type", None, choices=["Time Bars", "Volume Bars", "Dollar Bars"], selected="Time Bars"),
-                                    col_widths=[4, 5, 3]
+                                    ui.input_select("bar_type", None, choices=["Time Bars", "Volume Bars", "Dollar Bars"], selected="Dollar Bars"),
+                                    col_widths=[6, 6]
                                 ),
-                                ui.h6("Comparison Stats"),
                                 ui.output_table("engineering_stats_table")
                             )
                         ),
@@ -148,7 +153,6 @@ def predictive_ui():
                                         ui.column(6, ui.input_slider("vote_th", "Vote Threshold", min=0.1, max=1.0, value=0.4, step=0.05))
                                     )
                                 ),
-
                                 ui.panel_conditional(
                                     "input.labeler_type == 'TailSet'",
                                     ui.row(
@@ -156,8 +160,6 @@ def predictive_ui():
                                         ui.column(6, ui.input_numeric("tail_threshold", "Multiplier Threshold", value=1.0, step=0.1))
                                     )
                                 ),                                
-                                ui.markdown("---"),
-                                ui.h6("Label Distribution"),
                                 ui.output_table("dist_train_table")
                             )
                         ),
@@ -183,8 +185,6 @@ def predictive_ui():
                                     ui.input_numeric("vif_th", "VIF Threshold", value=10.0, min=1.1, step=0.5),
                                     col_widths=[12, 4, 4, 4]
                                 ),
-                                ui.markdown("---"),
-                                ui.h6("VIF & Feature Stats"),
                                 ui.output_table("feature_stats_table")
                             )
                         ),
@@ -213,7 +213,7 @@ def predictive_ui():
                     ui.row(
                         ui.column(
                             12,
-                            ui.card(ui.h6("Live Predictions"), ui.output_table("live_predictions_table")),
+                            ui.card(ui.h6("Live Predictions"), ui.output_ui("live_predictions_table")),
                             ui.card(ui.h6("Classification Report"), ui.output_table("classification_report_table")),
                         )
                     ),
@@ -239,6 +239,15 @@ def predictive_ui():
                             )
                         )
                     ),
+                    ui.row(
+                        ui.column(
+                            12,
+                            ui.card(
+                                ui.card_header("Strategy Performance Metrics"),
+                                ui.output_table("strategy_metrics_table")
+                            )
+                        )
+                    ),
 
                     ui.row(
                         ui.column(
@@ -250,15 +259,31 @@ def predictive_ui():
                             )
                         )
                     ),
-
+                    
                     ui.row(
-                        ui.column(
-                            12,
-                            ui.card(
-                                ui.card_header("Strategy Performance Metrics"),
-                                ui.output_table("strategy_metrics_table")
-                            )
-                        )
+                        ui.column(6, ui.card(
+                            ui.card_header("Primary Model: SHAP Mean Importance"),
+                            output_widget("shap_summary_primary"),
+                            full_screen=True
+                        )),
+                        ui.column(6, ui.card(
+                            ui.card_header("Meta Model: SHAP Mean Importance"),
+                            output_widget("shap_summary_meta"),
+                            full_screen=True
+                        ))
+                    ),
+                    
+                    ui.row(
+                        ui.column(6, ui.card(
+                            ui.card_header("Global Impact: SHAP Beeswarm"),
+                            output_widget("shap_beeswarm_plot"),
+                            full_screen=True
+                        )),
+                        ui.column(6, ui.card(
+                            ui.card_header("SHAP Local Explanation"),
+                            output_widget("shap_local_plot"),
+                            full_screen=True
+                        ))
                     )
                 )
             )
@@ -463,7 +488,7 @@ def predictive_server(input, output, session):
         if 'open_time' in df.columns:
             df = df.set_index(pd.to_datetime(df['open_time']))
         
-        ui.notification_show(f"Calibrating thresholds for {ticker}... This may take 20-30 seconds.", duration=5)
+        ui.notification_show(f"Calibrating thresholds for {ticker}", duration=5)
                 
         def calibration_loss(returns, N_min=10000):
             if len(returns) < 30:
@@ -750,10 +775,9 @@ def predictive_server(input, output, session):
         
         # Round for display but keep as numeric for formatter if possible, 
         # or just use the styled formatter
-        df.set_index("Feature", inplace=True)
-        
         styled = (
             df.style
+            .hide_index()
             .format({
                 "Mean": "{:.4f}",
                 "Std": "{:.4f}",
@@ -761,19 +785,24 @@ def predictive_server(input, output, session):
                 "Kurtosis": "{:.4f}",
                 "VIF": "{:.2f}"
             })
-            .set_properties(**{"font-size": "13px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}])
+            .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+            .set_table_styles([
+                {"selector": "th", "props": [("color", "#000000"), ("background-color", "#FCC780"), ("border", "1px solid #1a4da3"), ("text-transform", "uppercase"), ("font-weight", "700")]},
+                {"selector": "td", "props": [("padding", "8px"), ("border", "1px solid #1a4da3")]},
+                {"selector": "table", "props": [("border-collapse", "collapse"), ("border", "2px solid #1a4da3"), ("width", "100%")]},
+                {"selector": "th", "props": [("font-size", "11px"), ("text-align", "center")]}
+            ])
         )
         return styled
 
     @render_widget
     def feature_dist_plot():
         res = feature_analysis_result()
-        if res is None: return go.Figure()
+        if res is None: return None
         
         # Use the CLEANED dataframe (after VIF filtering)
         df = res['feat_df_clean']
-        if df.empty: return go.Figure()
+        if df.empty: return None
         
         # Limit to first 8 for visual clarity if many survive
         cols = df.columns
@@ -793,10 +822,16 @@ def predictive_server(input, output, session):
             
         fig.update_layout(
             template="plotly_dark",
-            height=350,
+            height=400,
+            width=965,
             barmode='overlay',
             margin=dict(t=40, b=40, l=40, r=40),
-            legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5)
+            legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
         )
         return fig
 
@@ -883,8 +918,9 @@ def predictive_server(input, output, session):
 
             # 1. Gather Data
             logger.log("Predictive", "INFO", f"Step 1: Gathering data for {len(tickers)} symbols")
-            with ui.Progress(min=0, max=len(tickers)) as p:
-                p.set(message="Stacking data...")
+            total_steps = len(tickers) + 7  # tickers + preprocess + VIF + primary + meta + backtest + SHAP + store
+            with ui.Progress(min=0, max=total_steps) as p:
+                p.set(0, message="Stacking data...")
                 all_rows = []
                 
                 # Check Bar Type and Cache
@@ -997,8 +1033,9 @@ def predictive_server(input, output, session):
                     logger.log("Predictive", "ERROR", "No valid data points found after stacking")
                     ui.notification_show("No valid data points found. Try increasing lookback or symbols.", type="error")
                     return
-                
                 logger.log("Predictive", "INFO", f"Step 2: Preprocessing stacked data ({sum(len(df) for df in all_rows)} rows)")
+                step = len(tickers)
+                p.set(step, message="Preprocessing & cleaning data...")
                 final_df = pd.concat(all_rows).sort_index()
                 
                 X_data = final_df[x_features].copy()
@@ -1011,6 +1048,7 @@ def predictive_server(input, output, session):
                 
                 if standardize_flag:
                     logger.log("Predictive", "INFO", "Standardizing features")
+                    p.set(message="Standardizing features...")
                     for f in x_features:
                         if f in X_data.columns:
                             m, s = X_data[f].mean(), X_data[f].std()
@@ -1023,6 +1061,8 @@ def predictive_server(input, output, session):
                     active_features = cached_feats
                 else:
                     logger.log("Predictive", "INFO", "Running VIF filter (no cache or mismatch)")
+                    step += 1
+                    p.set(step, message="Running VIF filter...")
                     vif_threshold = input.vif_th()
                     active_features = FeatureSelector.apply_vif_filter(X_data, threshold=vif_threshold) if len(x_features) > 1 else x_features
                 
@@ -1039,7 +1079,7 @@ def predictive_server(input, output, session):
                 
                 # Auto-Split Training set into 2 folds:
                 train_n = test_start
-                meta_start = int(train_n * 0.2)
+                meta_start = int(train_n * 0.8)
                 
                 logger.log("Predictive", "INFO", f"Splitting data: n={n}, test_start={test_start}, auto-split train at {meta_start}")
                 
@@ -1059,139 +1099,164 @@ def predictive_server(input, output, session):
                 y_ret_test = Y_ret.iloc[test_start:]
                 
                 logger.log("Predictive", "INFO", f"Sequential Split - Primary: {len(X_train_primary)}, Meta: {len(X_train_meta)}, Test: {len(X_test)}")
+                # 3. Train Primary
+                logger.log("Predictive", "INFO", f"Step 3: Training Primary model ({reg_type})")
+                step += 1
+                p.set(step, message=f"Training Primary model ({reg_type})...")
+                model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                model.fit(X_train_primary, y_train_primary)
+                logger.log("Predictive", "INFO", "Primary model training complete")
 
-            # 3. Train Primary
-            logger.log("Predictive", "INFO", f"Step 3: Training Primary model ({reg_type})")
-            model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
-            model.fit(X_train_primary, y_train_primary)
-            logger.log("Predictive", "INFO", "Primary model training complete")
-
-            # 4. Train Meta-Model using Sophisticated Backtest
-            meta_model = None
-            meta_results = {}
-            try:
-                logger.log("Predictive", "INFO", "Step 4: Training Meta-model using Backtest Engine")
-                
-                # Get Primary predictions on the Meta fold
-                p_meta_input = model.predict(X_train_meta)
-                p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
-                if not is_classification:
-                    p_meta_signals = np.sign(p_meta_signals)
-                                
-                if len(tickers) == 1:
-                    logger.log("Predictive", "INFO", "Single symbol detected, using BacktestEngine for meta-labels")
-                    ticker = tickers[0]
-                    full_df = manager.load_data(ticker, interval)
-                    if 'open_time' in full_df.columns:
-                        full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
-                    
-                    # Align df to meta-fold
-                    meta_df = full_df.reindex(X_train_meta.index)
-                    
-                    # Calculate volatility for TP/SL
-                    # Use rolling std of log returns, annualized or just raw for the engine
-                    returns = np.log(full_df['close'] / full_df['close'].shift(1))
-                    volatility = returns.rolling(window=input.vol_window()).std().reindex(X_train_meta.index).fillna(0.01)
-                    bt_engine = BacktestEngine(tp_multiplier=input.upper_mult(), sl_multiplier=input.lower_mult(), min_holding_bar=2, max_holding_bar=input.max_holding())
-                    y_meta = bt_engine.generate_meta_labels(
-                        df=meta_df,
-                        primary_signals=p_meta_signals,
-                        volatility=volatility,
-                        position_size=pd.Series(1.0, index=X_train_meta.index)
-                    )
-                    # Convert outcomes (1, -1) to binary (1 for profit, 0 for loss/no trade)
-                    y_meta = (y_meta == 1).astype(int)
-                else:
-                    logger.log("Predictive", "INFO", "Multiple symbols: using naive meta-labels (sign match)")
-                    if is_classification:
-                        y_meta = (p_meta_input == y_train_meta).astype(int)
-                    else:
-                        y_meta = (np.sign(p_meta_input) * np.sign(y_ret_meta) > 0.0000).astype(int)
-
-                # Meta features = original features + primary prediction
-                meta_features = pd.concat([X_train_meta, pd.Series(p_meta_input, index=X_train_meta.index, name='primary_pred')], axis=1)
-                meta_model = LogisticRegression(max_iter=1000)
-                meta_model.fit(meta_features, y_meta)
-                logger.log("Predictive", "INFO", "Meta-model training complete")
-                
-                # 4.1 Run Sophisticated Backtest on TEST SET
-                logger.log("Predictive", "INFO", "Step 4.1: Running Backtest on Test Set")
-                if len(tickers) == 1:
-                    ticker = tickers[0]
-                    full_df = manager.load_data(ticker, interval)
-                    if 'open_time' in full_df.columns:
-                        full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
-                    
-                    test_df_ohlcv = full_df.reindex(X_test.index)
-                    returns_all = np.log(full_df['close'] / full_df['close'].shift(1))
-                    vol_test = returns_all.rolling(window=input.vol_window()).std().reindex(X_test.index).fillna(0.005)
-                    
-                    # RAW signals backtest
-                    p_test_input = model.predict(X_test)
-                    p_test_signals = pd.Series(p_test_input, index=X_test.index)
+                # 4. Train Meta-Model using Sophisticated Backtest
+                meta_model = None
+                meta_results = {}
+                try:
+                    logger.log("Predictive", "INFO", "Step 4: Training Meta-model")
+                    step += 1
+                    p.set(step, message="Training Meta-model & Backtest...")
+                    # Get Primary predictions on the Meta fold
+                    p_meta_input = model.predict(X_train_meta)
+                    p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
                     if not is_classification:
-                        p_test_signals = np.sign(p_test_signals)
-                    
-                    bt_engine = BacktestEngine()
-                    _, raw_metrics, raw_equity, _, raw_sig, raw_size = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(1.0, index=X_test.index))
-                    
-                    # META signals backtest
-                    meta_test_features = pd.concat([X_test, pd.Series(p_test_input, index=X_test.index, name='primary_pred')], axis=1)
-                    meta_probs = meta_model.predict_proba(meta_test_features)
-                    idx_1 = np.where(meta_model.classes_ == 1)[0]
-                    if len(idx_1) > 0:
-                        probs = meta_probs[:, idx_1[0]]
-                        # Sizing logic: (2*p - 1) * 2 clipped to [-1, 1]
-                        meta_sizing = np.clip((2 * probs - 1), -1, 1)
+                        p_meta_signals = np.sign(p_meta_signals)
+                                    
+                    if len(tickers) == 1:
+                        logger.log("Predictive", "INFO", "Single symbol detected, using BacktestEngine for meta-labels")
+                        ticker = tickers[0]
+                        full_df = manager.load_data(ticker, interval)
+                        if 'open_time' in full_df.columns:
+                            full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
+                        
+                        # Align df to meta-fold
+                        meta_df = full_df.reindex(X_train_meta.index)
+                        
+                        # Naive meta-labels
+                        y_meta = (p_meta_signals * y_ret_meta > 0).astype(int)
                     else:
-                        meta_sizing = np.zeros(len(X_test))
-                    
-                    trade_results, metrics, equity_curve, buy_hold_equity, sig_hist, size_hist = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(meta_sizing, index=X_test.index))
-                    
-                    meta_results = {
-                        'raw_metrics': raw_metrics,
-                        'raw_equity': raw_equity,
-                        'raw_sig': raw_sig,
-                        'raw_size': raw_size,
-                        'meta_metrics': metrics,
-                        'meta_equity': equity_curve,
-                        'meta_sig': sig_hist,
-                        'meta_size': size_hist,
-                        'buy_hold_equity': buy_hold_equity,
-                    }
+                        logger.log("Predictive", "INFO", "Multiple symbols: using naive meta-labels (sign match)")
+                        if is_classification:
+                            y_meta = (p_meta_input == y_train_meta).astype(int)
+                        else:
+                            y_meta = (np.sign(p_meta_input) * np.sign(y_ret_meta) > 0.0000).astype(int)
 
-            except Exception as e:
-                logger.log("Predictive", "WARNING", f"Meta-sizing/Backtest failed: {str(e)}")
-                import traceback
-                logger.log("Predictive", "DEBUG", traceback.format_exc())
-            
-            # 5. Store Results
-            logger.log("Predictive", "INFO", "Step 5: Storing results")
-            results.set({
-                'model': model,
-                'meta_model': meta_model,
-                'meta_results': meta_results,
-                'X_train_primary': X_train_primary,
-                'y_train_primary': y_train_primary,
-                'y_ret_primary': y_ret_primary,
-                'X_train_meta': X_train_meta,
-                'y_train_meta': y_train_meta,
-                'y_ret_meta': y_ret_meta,
-                'X_test': X_test,
-                'y_test': y_test,
-                'y_ret_test': y_ret_test,
-                'X_raw': X_raw,
-                'active_features': active_features,
-                'is_classification': is_classification,
-                'reg_type': reg_type,
-                'l_params': l_params,
-                'indicator_window': ind_window,
-                'fwd_window': fwd_window,
-                'tickers': tickers,
-                'interval': interval,
-                'standardize': standardize_flag
-            })
-            ui.notification_show("Analysis complete!", type="success")
+                    # Meta features = original features + primary prediction
+                    meta_features = pd.concat([X_train_meta, pd.Series(p_meta_input, index=X_train_meta.index, name='primary_pred')], axis=1)
+                    meta_model = LogisticRegression(max_iter=1000)
+                    meta_model.fit(meta_features, y_meta)
+                    logger.log("Predictive", "INFO", "Meta-model training complete")
+                    
+                    # 4.1 Run Sophisticated Backtest on TEST SET
+                    logger.log("Predictive", "INFO", "Step 4.1: Running Backtest on Test Set")
+                    step += 1
+                    p.set(step, message="Running backtest on test set...")
+                    if len(tickers) == 1:
+                        ticker = tickers[0]
+                        full_df = manager.load_data(ticker, interval)
+                        if 'open_time' in full_df.columns:
+                            full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
+                        
+                        test_df_ohlcv = full_df.reindex(X_test.index)
+                        returns_all = np.log(full_df['close'] / full_df['close'].shift(1))
+                        vol_test = returns_all.rolling(window=input.vol_window()).std().reindex(X_test.index).fillna(0.005)
+                        
+                        # RAW signals backtest
+                        p_test_input = model.predict(X_test)
+                        p_test_signals = pd.Series(p_test_input, index=X_test.index)
+                        if not is_classification:
+                            p_test_signals = np.sign(p_test_signals)
+                        
+                        bt_engine = BacktestEngine()
+                        _, raw_metrics, raw_equity, _, raw_sig, raw_size = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(1.0, index=X_test.index))
+                        
+                        # META signals backtest
+                        meta_test_features = pd.concat([X_test, pd.Series(p_test_input, index=X_test.index, name='primary_pred')], axis=1)
+                        meta_probs = meta_model.predict_proba(meta_test_features)
+                        idx_1 = np.where(meta_model.classes_ == 1)[0]
+                        if len(idx_1) > 0:
+                            meta_sizing = meta_probs[:, idx_1[0]]
+                            meta_sizing = np.clip((meta_sizing * 2 - 1) * 2, 0, 1) 
+                        else:
+                            meta_sizing = np.zeros(len(X_test))
+
+                        trade_results, metrics, equity_curve, buy_hold_equity, sig_hist, size_hist = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(meta_sizing, index=X_test.index))
+                        
+                        meta_results = {
+                            'raw_metrics': raw_metrics,
+                            'raw_equity': raw_equity,
+                            'raw_sig': raw_sig,
+                            'raw_size': raw_size,
+                            'meta_metrics': metrics,
+                            'meta_equity': equity_curve,
+                            'meta_sig': sig_hist,
+                            'meta_size': size_hist,
+                            'buy_hold_equity': buy_hold_equity,
+                        }
+
+                except Exception as e:
+                    logger.log("Predictive", "WARNING", f"Meta-sizing/Backtest failed: {str(e)}")
+                    import traceback
+                    logger.log("Predictive", "DEBUG", traceback.format_exc())
+                
+                # 4.2 Calculate SHAP Values
+                shap_results = {}
+                try:
+                    logger.log("Predictive", "INFO", "Step 4.2: Calculating SHAP values")
+                    step += 1
+                    p.set(step, message="Calculating SHAP values...")
+                    # Primary Model SHAP (Tree-based if RF/XGB)
+                    if model is not None:
+                        # Use a sample of test data for SHAP to keep it fast
+                        X_shap_primary = X_test.iloc[-200:] if len(X_test) > 200 else X_test
+                        explainer_primary = shap.Explainer(model)
+                        shap_values_primary = explainer_primary(X_shap_primary)
+                        shap_results['primary'] = {
+                            'values': shap_values_primary,
+                            'features': X_test.columns.tolist()
+                        }
+                    
+                    # Meta Model SHAP (Linear)
+                    if meta_model is not None:
+                        X_shap_meta = meta_test_features.iloc[-200:] if len(meta_test_features) > 200 else meta_test_features
+                        explainer_meta = shap.Explainer(meta_model, meta_features)
+                        shap_values_meta = explainer_meta(X_shap_meta)
+                        shap_results['meta'] = {
+                            'values': shap_values_meta,
+                            'features': meta_test_features.columns.tolist()
+                        }
+                    logger.log("Predictive", "INFO", "SHAP calculation complete")
+                except Exception as se:
+                    logger.log("Predictive", "WARNING", f"SHAP calculation failed: {str(se)}")
+
+                # 5. Store Results
+                logger.log("Predictive", "INFO", "Step 5: Storing results")
+                step += 1
+                p.set(step, message="Storing results...")
+                results.set({
+                    'model': model,
+                    'meta_model': meta_model,
+                    'meta_results': meta_results,
+                    'shap_results': shap_results,
+                    'X_train_primary': X_train_primary,
+                    'y_train_primary': y_train_primary,
+                    'y_ret_primary': y_ret_primary,
+                    'X_train_meta': X_train_meta,
+                    'y_train_meta': y_train_meta,
+                    'y_ret_meta': y_ret_meta,
+                    'X_test': X_test,
+                    'y_test': y_test,
+                    'y_ret_test': y_ret_test,
+                    'X_raw': X_raw,
+                    'active_features': active_features,
+                    'is_classification': is_classification,
+                    'reg_type': reg_type,
+                    'l_params': l_params,
+                    'indicator_window': ind_window,
+                    'fwd_window': fwd_window,
+                    'tickers': tickers,
+                    'interval': interval,
+                    'standardize': standardize_flag
+                })
+                ui.notification_show("Analysis complete!", type="success")
             
         except Exception as e:
             logger.log("Predictive", "ERROR", f"FATAL ERROR in run_analysis: {str(e)}")
@@ -1321,63 +1386,66 @@ def predictive_server(input, output, session):
     def label_chart():
         res = labeling_result()
         if res is None:
-            return go.Figure()
+            return None
 
         df, y, ticker = res['df'], res['y'], res['ticker']
 
         res_ = results.get()
         if res_ is not None and ticker in res_['tickers']:
             test_df = res_['X_test']
-            # Trim to show only training data in the labeling preview if model results exist
-            df = df[:-len(test_df)]
-            
+            df = df[:-len(test_df)]  # show only training data if model exists
+
         df = df.copy()
         df.index = df.index.strftime('%Y-%m-%d %H:%M')
-
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['close'],
-            name='Price',
-            line=dict(color='#9AA0A6', width=1.5)
-        ))
 
         if res['is_classification']:
             y_clean = y.dropna()
             df_plot = df
-            df_plot['label'] = y_clean.map({1: "UP", -1: "DOWN", 0: "SIDEWAYS"})
+            # Convert labels to numeric for continuous color scale
+            df_plot['label'] = y_clean.map({1: 1, 0: 0, -1: -1})
 
-            label_colors = [
-                ("UP", "#00E5A8"),
-                ("DOWN", "#FF4D4D"),
-                ("SIDEWAYS", "#FFA726")
-            ]
+            fig = px.scatter(
+                df_plot,
+                x=df_plot.index,
+                y="close",
+                color="label",
+                color_continuous_scale="Spectral_r",
+                range_color=[-1, 1],
+                size_max=7
+            )
 
-            for label, color in label_colors:
-                mask = df_plot['label'] == label
-                if mask.any():
-                    fig.add_trace(go.Scatter(
-                        x=df_plot.index[mask],
-                        y=df_plot['close'][mask],
-                        mode='markers',
-                        name=label,
-                        marker=dict(color=color, size=5)
-                    ))
+            # Customize the colorbar to show label names
+            fig.update_traces(
+                marker=dict(colorbar=dict(
+                    title="Label",
+                    tickmode="array",
+                    tickvals=[-1, 0, 1],
+                    ticktext=["DOWN", "SIDEWAYS", "UP"]
+                ))
+            )
 
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df.index,
+                y=df['close'],
+                name='Price',
+                line=dict(color='#9AA0A6', width=1.5)
+            ))
+
+        # Layout styling
         fig.update_layout(
             template="plotly_dark",
-            height=400,
+            height=450,
+            width=965,
             margin=dict(t=40, b=60, l=30, r=30),
             xaxis_title=None,
             yaxis_title=None,
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.15,
-                xanchor="center",
-                x=0.5
-            )
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)")
         )
 
         return fig
@@ -1397,19 +1465,27 @@ def predictive_server(input, output, session):
                 "Percentage": (counts.values / len(y) * 100).round(1)
             })
         if res['is_classification']:
-            summary.set_index("Label", inplace=True)
             styled = (
                 summary.style
+                .hide_index()
                 .format({"Count": "{:.0f}", "Percentage": "{:.1f}%"})
-                .set_properties(**{"font-size": "14px", "text-align": "center"})
-                .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+                .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+                .set_table_styles([
+                    {"selector": "th", "props": [("color", "#000000"), ("background-color", "#FCC780"), ("border", "1px solid #1a4da3"), ("text-transform", "uppercase"), ("font-weight", "700")]},
+                    {"selector": "td", "props": [("padding", "8px"), ("border", "1px solid #1a4da3")]},
+                    {"selector": "table", "props": [("border-collapse", "collapse"), ("border", "2px solid #1a4da3"), ("width", "100%")]}
+                ])
             )
         else:
-            summary.set_index("Metric", inplace=True)
             styled = (
                 summary.style
-                .set_properties(**{"font-size": "14px", "text-align": "center"})
-                .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+                .hide_index()
+                .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+                .set_table_styles([
+                    {"selector": "th", "props": [("color", "#000000"), ("background-color", "#FCC780"), ("border", "1px solid #1a4da3"), ("text-transform", "uppercase"), ("font-weight", "700")]},
+                    {"selector": "td", "props": [("padding", "8px"), ("border", "1px solid #1a4da3")]},
+                    {"selector": "table", "props": [("border-collapse", "collapse"), ("border", "2px solid #1a4da3"), ("width", "100%")]}
+                ])
             )
             
         return styled
@@ -1459,20 +1535,24 @@ def predictive_server(input, output, session):
         report = classification_report(res['y_test'], preds_test, labels=[-1, 0, 1], target_names=["DOWN", "SIDEWAYS", "UP"], output_dict=True)
         df = pd.DataFrame(report).transpose().round(3).reset_index()
         df.columns = ["Metric", "Precision", "Recall", "F1-Score", "Support"]
-        df.set_index("Metric", inplace=True)
         styled = (
-            df.style.format({
+            df.style.hide_index()
+            .format({
                 "Precision": "{:.1%}",
                 "Recall": "{:.1%}",
                 "F1-Score": "{:.1%}",
                 "Support": "{:.0f}"
             })
-            .set_properties(**{"font-size": "14px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+            .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+            .set_table_styles([
+                {"selector": "th", "props": [("color", "#000000"), ("background-color", "#FCC780"), ("border", "1px solid #1a4da3"), ("text-transform", "uppercase"), ("font-weight", "700")]},
+                {"selector": "td", "props": [("padding", "8px"), ("border", "1px solid #1a4da3")]},
+                {"selector": "table", "props": [("border-collapse", "collapse"), ("border", "2px solid #1a4da3"), ("width", "100%")]}
+            ])
         )
         return styled
 
-    @render.table
+    @render.ui
     async def live_predictions_table():
         res = results.get()
         if res is None: return None
@@ -1523,19 +1603,25 @@ def predictive_server(input, output, session):
                             X_m = pd.concat([X_pred, pd.Series([signal], index=X_pred.index, name='primary_pred')], axis=1)
                             probs = meta_model.predict_proba(X_m)[0]
                             idx_1 = np.where(meta_model.classes_ == 1)[0]
-                            meta_size = probs[idx_1[0]] if len(idx_1) > 0 else (1.0 if meta_model.classes_[0] == 1 else 0.0)
-                            meta_size = (2 * meta_size - 1) * 2
-                            meta_size = np.clip(meta_size, -1, 1)
-                        row = {"Ticker": sym, "Price": f"{latest_price:,.2f}", "Sizing": f"{meta_size:.1%}"}
+                            meta_sizing = probs[idx_1[0]] if len(idx_1) > 0 else (1.0 if meta_model.classes_[0] == 1 else 0.0)
+                            meta_sizing = np.clip((meta_sizing * 2 - 1) * 2, 0, 1)
+
+                        row = {"Ticker": sym, "Price": f"{latest_price:,.2f}", "Sizing": f"{meta_sizing:.1%}"}
                         if is_classification:
                             mapping = {1: "UP", -1: "DOWN", 0: "SIDEWAYS"}
-                            row.update({"Predicted": mapping.get(signal, "N/A")})
+                            pred_val = mapping.get(signal, "N/A")
+                            badge_class = "prediction-up" if signal == 1 else "prediction-down" if signal == -1 else ""
+                            row.update({"Predicted": f'<span class="prediction-badge {badge_class}">{pred_val}</span>'})
+                            
                             if hasattr(model, "predict_proba"):
                                 confidence = np.max(model.predict_proba(X_pred)[0])
                                 row["Confidence"] = f"{confidence:.1%}"
                         else:
                             row.update({"Predicted Ret": f"{signal:.4f}"})
                             row["Signal"] = "LONG" if signal > 0 else "SHORT"
+                        
+                        # Terminal styling for sizing
+                        row["Sizing"] = f'<span style="color: #FCC780; font-weight: 700;">{meta_size:.1%}' + (' [!]' if meta_size > 0.8 else '') + '</span>'
                         
                         prediction_rows.append(row)
                 except Exception as e:
@@ -1546,13 +1632,18 @@ def predictive_server(input, output, session):
 
         if not prediction_rows: return None
         df = pd.DataFrame(prediction_rows)
-        df.set_index("Ticker", inplace=True)
+        # Use pandas styler to render HTML safely with terminal styling
         styled = (
             df.style
-            .set_properties(**{"font-size": "14px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+            .hide_index()
+            .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+            .set_table_styles([
+                {"selector": "th", "props": [("color", "#000000"), ("background-color", "#FCC780"), ("border", "1px solid #1a4da3"), ("text-transform", "uppercase"), ("font-weight", "700")]},
+                {"selector": "td", "props": [("padding", "8px"), ("border", "1px solid #1a4da3")]},
+                {"selector": "table", "props": [("border-collapse", "collapse"), ("border", "2px solid #1a4da3"), ("width", "100%")]}
+            ])
         )
-        return styled
+        return ui.HTML(styled.to_html(escape=False))
 
 
     from plotly.subplots import make_subplots
@@ -1593,25 +1684,78 @@ def predictive_server(input, output, session):
                 vertical_spacing=0.08,
                 row_heights=[0.6, 0.4]
             )
-            
+
             # Row 1: Equity Curves
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Raw Equity'] / plot_df['Raw Equity'].iloc[0] - 1, name="Raw Signal PnL", line=dict(color="#9AA0A6", width=3)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Meta Equity'] / plot_df['Meta Equity'].iloc[0] - 1, name="Meta Optimized PnL", line=dict(color="#00E5A8", width=3)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BnH Equity'] / plot_df['BnH Equity'].iloc[0] - 1, name="Buy & Hold PnL", line=dict(color="#FFD700", width=2, dash='dot')), row=1, col=1)
-            
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Raw Equity'] / plot_df['Raw Equity'].iloc[0] - 1,
+                name="Raw Signal PnL",
+                line=dict(color="#9AA0A6", width=3)
+            ), row=1, col=1)
+
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Meta Equity'] / plot_df['Meta Equity'].iloc[0] - 1,
+                name="Meta Optimized PnL",
+                line=dict(color="#00E5A8", width=3)
+            ), row=1, col=1)
+
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df['BnH Equity'] / plot_df['BnH Equity'].iloc[0] - 1,
+                name="Buy & Hold PnL",
+                line=dict(color="#FFD700", width=2, dash='dot')
+            ), row=1, col=1)
+
             # Row 2: Signals and Sizes from Backtest
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Raw Size'], name="Raw Size", line=dict(color="#9AA0A6", width=1.5), opacity=0.5), row=2, col=1)
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Meta Size'], name="Meta Size", line=dict(color="#4cc9f0", width=1.5)), row=2, col=1)
-            
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Raw Size'],
+                name="Raw Size",
+                line=dict(color="#9AA0A6", width=1.5),
+                opacity=0.5
+            ), row=2, col=1)
+
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Meta Size'],
+                name="Meta Size",
+                line=dict(color="#4cc9f0", width=1.5)
+            ), row=2, col=1)
+
+            # Layout update
             fig.update_layout(
-                height=500,
+                height=550,
+                width=1500,
                 template="plotly_dark",
                 margin=dict(t=40, b=60, l=40, r=30),
-                yaxis_tickformat=".1%",
+                paper_bgcolor="#0b3d91",
+                plot_bgcolor="#0b3d91",
+                font=dict(family="Space Mono", color="white"),
+                xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+                yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
                 legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
             )
-            fig.update_yaxes(title_text="Cumulative PnL", row=1, col=1)
-            fig.update_yaxes(title_text="Signal / Size", row=2, col=1)
+
+            # Update Y axes
+            fig.update_yaxes(title_text="Cumulative PnL", row=1, col=1,
+                            gridcolor="rgba(255,255,255,0.6)",
+                            linecolor="white",
+                            tickcolor="white",
+                            zerolinecolor="white")
+
+            fig.update_yaxes(title_text="Signal", row=2, col=1,
+                            gridcolor="rgba(255,255,255,0.6)",
+                            linecolor="white",
+                            tickcolor="white",
+                            zerolinecolor="white")
+
+            # Update X axes (shared)
+            fig.update_xaxes(gridcolor="rgba(255,255,255,0.6)",
+                            linecolor="white",
+                            tickcolor="white",
+                            zerolinecolor="white")
+
             return fig
 
         # Fallback to naive backtest
@@ -1632,8 +1776,10 @@ def predictive_server(input, output, session):
             idx_1 = np.where(meta_model.classes_ == 1)[0]
             if len(idx_1) > 0:
                 meta_sizing = probs[:, idx_1[0]]
+                meta_sizing = np.clip((meta_sizing * 2 - 1) * 2, 0, 1)
 
-        bt['Size'] = (2 * meta_sizing - 1)
+        
+        bt['Size'] = meta_sizing
         bt['Size'] = np.clip(bt['Size'], -1, 1)
         bt['Signal'] = np.sign(bt['Pred']) if not is_classification else bt['Pred']
 
@@ -1655,9 +1801,9 @@ def predictive_server(input, output, session):
         )
 
         perf_series = [
-            ("Both_raw", "Raw Signal", "#9AA0A6", 3, None),
-            ("Both_meta", "Meta Optimized", "#00E5A8", 3, None),
-            ("Ret", "Benchmark", "#FFA726", 2, "dot"),
+            ("Both_raw", "Raw Signal", "#1a1a1a", 3, None),       # dark gray
+            ("Both_meta", "Meta Optimized", "#ff007f", 3, None),   # neon pink
+            ("Ret", "Benchmark", "#00bfae", 2, "dot"),            # cyan/teal
         ]
 
         for col, name, color, width, dash in perf_series:
@@ -1693,9 +1839,9 @@ def predictive_server(input, output, session):
         )
 
         fig.update_layout(
-            height=450,
+            height=500,
+            width=1400,
             template="plotly_dark",
-            autosize=False,
             margin=dict(t=40, b=60, l=40, r=30),
             yaxis_tickformat=".1%",
             legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5)
@@ -1709,74 +1855,322 @@ def predictive_server(input, output, session):
     @render_widget
     def predicted_label_chart():
         res = results.get()
-        if res is None: return None
-        
+        if res is None:
+            return None
+            
         test_df = res['X_test']
         model = res['model']
         meta_model = res['meta_model']
         is_classification = res['is_classification']
         
         if not is_classification or len(test_df) == 0:
-            return None # Or a message
+            return None
             
-        # 1. Predict on Test Set
         primary_preds = model.predict(test_df)
         
-        # Add primary_pred as a feature for the meta-model
-        X_meta = pd.concat([test_df, pd.Series(primary_preds, index=test_df.index, name='primary_pred')], axis=1)
+        X_meta = pd.concat(
+            [test_df, pd.Series(primary_preds, index=test_df.index, name='primary_pred')],
+            axis=1
+        )
         
         meta_probs = meta_model.predict_proba(X_meta)
         idx_1 = np.where(meta_model.classes_ == 1)[0]
-        if len(idx_1) > 0:
-            probs_meta = meta_probs[:, idx_1[0]]
-            # Map logic: if prob < 0.5, flip signal
-            true_pred = np.where(probs_meta < 0.5, primary_preds * -1, primary_preds)
-        else:
-            true_pred = primary_preds
         
-        # 2. Get Price Data for the test set period
-        # Since we only support one ticker for classification, we can load it
+        if len(idx_1) > 0:
+            meta_sizing = meta_probs[:, idx_1[0]]
+            meta_sizing = np.clip((2 * meta_sizing - 1) * 2, 0, 1)
+            true_pred = primary_preds * meta_sizing
+        else:
+            true_pred = primary_preds.astype(float)
+            
         ticker = res['tickers'][0]
         interval = res['interval']
         full_df = manager.load_data(ticker, interval)
-        if full_df is None: return None
-        
+        if full_df is None:
+            return None
+            
         if 'open_time' in full_df.columns:
             full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
             
-        # Filter full_df to match test_df index
         plot_df = full_df.loc[test_df.index].copy()
         plot_df['pred'] = true_pred
         plot_df.index = plot_df.index.strftime('%Y-%m-%d %H:%M')
         
         fig = go.Figure()
         
-        # Price Line
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['close'], name='Price', line=dict(color='#9AA0A6', width=1.5)))
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df['close'],
+            name='Price',
+            line=dict(color='#9AA0A6', width=1.5)
+        ))
         
-        # Colored markers for predicted labels
-        # Using user's colors: UP=#00E5A8, DOWN=#FF4D4D, SIDEWAYS=#FFA726
-        mapping = {1: ("UP", "#00E5A8"), -1: ("DOWN", "#FF4D4D"), 0: ("SIDEWAYS", "#FFA726")}
+        fig = px.scatter(
+            plot_df,
+            x=plot_df.index,
+            y='close',
+            color='pred',
+            color_continuous_scale='Spectral_r',
+            range_color=[-1, 1],
+            size_max=7
+        )
+
+        fig.update_traces(
+            mode='markers',
+            marker=dict(size=7),
+            hovertemplate='Time: %{x}<br>Price: %{y}<br>Signal: %{marker.color:.2f}<extra></extra>'
+        )
         
-        for val, (label, color) in mapping.items():
-            mask = plot_df['pred'] == val
-            if mask.any():
-                fig.add_trace(go.Scatter(
-                    x=plot_df.index[mask], y=plot_df['close'][mask],
-                    mode='markers', name=f"Pred: {label}",
-                    marker=dict(color=color, size=6)
-                ))
-                
         fig.update_layout(
-            title=f"Predicted Labels on Test Set: {ticker}",
             template="plotly_dark",
-            height=400,
-            autosize=False,
+            height=550,
+            width=1500,
             margin=dict(t=50, b=80, l=40, r=40),
             xaxis_title="Time",
             yaxis_title="Price",
-            legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5)
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.2,
+                xanchor="center",
+                x=0.5
+            )
         )
+        
+        return fig
+        
+    @render_widget
+    def shap_summary_primary():
+        res = results.get()
+        if res is None or 'shap_results' not in res or 'primary' not in res['shap_results']:
+            return None
+        
+        shap_data = res['shap_results']['primary']
+        sv = shap_data['values']
+        
+        if not hasattr(sv, 'values'):
+            return None
+            
+        # Extract feature names and mean absolute SHAP values
+        feature_names = sv.feature_names
+        # For multi-class, sv might be (samples, features, classes)
+        if len(sv.shape) == 3:
+            # Aggregate across all classes or pick one? Usually mean abs is better for global
+            vals = np.abs(sv.values).mean(axis=(0, 2))
+        else:
+            vals = np.abs(sv.values).mean(axis=0)
+            
+        # Create DataFrame for plotting
+        df_plot = pd.DataFrame({'Feature': feature_names, 'Importance': vals}).sort_values('Importance', ascending=True)
+        
+        fig = px.bar(
+            df_plot, x='Importance', y='Feature', orientation='h',
+            template="plotly_dark",
+            color_continuous_scale='Viridis'
+        )
+        
+        fig.update_layout(
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=400,
+            width=710,
+        )
+        fig.update_traces(marker_color="#FCC780")
+        
+        return fig
+
+    @render_widget
+    def shap_summary_meta():
+        res = results.get()
+        if res is None or 'shap_results' not in res or 'meta' not in res['shap_results']:
+            return None
+        
+        shap_data = res['shap_results']['meta']
+        sv = shap_data['values']
+        
+        if not hasattr(sv, 'values'):
+            return None
+            
+        feature_names = sv.feature_names
+        if len(sv.shape) == 3:
+            vals = np.abs(sv.values).mean(axis=(0, 2))
+        else:
+            vals = np.abs(sv.values).mean(axis=0)
+            
+        df_plot = pd.DataFrame({'Feature': feature_names, 'Importance': vals}).sort_values('Importance', ascending=True)
+        
+        fig = px.bar(
+            df_plot, x='Importance', y='Feature', orientation='h',
+            template="plotly_dark"
+        )
+        
+        fig.update_layout(
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=400,
+            width=710,
+        )
+        fig.update_traces(marker_color="#FCC780")
+        
+        return fig
+
+    @render_widget
+    def shap_beeswarm_plot():
+        res = results.get()
+        if res is None or 'shap_results' not in res or 'primary' not in res['shap_results']:
+            return None
+            
+        shap_data = res['shap_results']['primary']
+        sv = shap_data['values']
+        
+        if not hasattr(sv, 'values'):
+            return None
+            
+        # Get mean abs importance for feature ordering
+        feature_names = sv.feature_names
+        if len(sv.shape) == 3:
+            vals = np.abs(sv.values).mean(axis=(0, 2))
+            sv_vals = sv.values[:, :, 1 if sv.shape[2] > 1 else 0]
+            sv_data = sv.data
+        else:
+            vals = np.abs(sv.values).mean(axis=0)
+            sv_vals = sv.values
+            sv_data = sv.data
+
+        # Top 15 features for performance
+        order = np.argsort(vals)[-15:]
+        
+        plot_rows = []
+        for i in order:
+            feat_name = feature_names[i]
+            feat_vals = sv_vals[:, i]
+            raw_vals = sv_data[:, i] if sv_data is not None else np.zeros_like(feat_vals)
+            
+        # Subsample if too many points for Plotly
+        if len(sv_vals) > 500:
+            idx = np.random.choice(len(sv_vals), 500, replace=False)
+            sv_vals = sv_vals[idx]
+            sv_data = sv_data[idx] if sv_data is not None else None
+
+        plot_rows = []
+        for i, feat_idx in enumerate(order):
+            feat_name = feature_names[feat_idx]
+            f_vals = sv_vals[:, feat_idx]
+            r_vals = sv_data[:, feat_idx] if sv_data is not None else np.zeros_like(f_vals)
+            
+            # Simple manual jitter for swarm effect
+            # We map each feature to its index and add noise
+            for f_val, r_val in zip(f_vals, r_vals):
+                plot_rows.append({
+                    'Feature': feat_name,
+                    'FeatureIdx': i,
+                    'JitteredIdx': i + np.random.normal(0, 0.08),
+                    'SHAP Value': f_val,
+                    'Feature Value': r_val
+                })
+        
+        df_p = pd.DataFrame(plot_rows)
+        
+        fig = px.scatter(
+            df_p, x='SHAP Value', y='JitteredIdx', color='Feature Value',
+            template="plotly_dark",
+            color_continuous_scale='Spectral_r',
+            labels={'JitteredIdx': 'Feature'},
+            size_max=15
+        )
+        
+        fig.update_traces(marker=dict(size=4, opacity=0.7))
+        
+        fig.update_layout(
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(
+                gridcolor="rgba(255, 255, 255, 0.3)", 
+                zerolinecolor="rgba(255, 255, 255, 0.5)",
+                tickmode='array',
+                tickvals=list(range(len(order))),
+                ticktext=[feature_names[i] for i in order]
+            ),
+            margin=dict(l=10, r=10, t=30, b=50),
+            height=550,
+            width=710,
+            coloraxis_colorbar=dict(title="Feature Value", len=0.5, yanchor="middle", y=0.5)
+        )
+        return fig
+
+    @render_widget
+    def shap_local_plot():
+        res = results.get()
+        if res is None or 'shap_results' not in res or 'primary' not in res['shap_results']:
+            return None
+            
+        shap_data = res['shap_results']['primary']
+        sv = shap_data['values']
+        
+        if not hasattr(sv, 'values'):
+            return None
+            
+        # Waterfall plot for the LATEST bar in the test set
+        idx = -1
+        
+        sv_row = sv[idx]
+        feature_names = sv.feature_names
+        
+        if len(sv_row.shape) == 2: # (features, classes)
+            class_idx = 1 if sv_row.shape[1] > 1 else 0
+            row_vals = sv_row.values[:, class_idx]
+            base_val = sv_row.base_values[class_idx]
+        else:
+            row_vals = sv_row.values
+            base_val = sv_row.base_values
+
+        # Sort by absolute value for a better waterfall
+        order = np.argsort(np.abs(row_vals))[-10:] # Top 10 contributors
+        
+        final_names = [feature_names[i] for i in order]
+        final_vals = [row_vals[i] for i in order]
+        
+        # Add 'Other' if needed? For now just top 10
+        
+        fig = go.Figure(go.Waterfall(
+            name="SHAP", orientation="h",
+            measure=["absolute"] + ["relative"] * (len(final_names) - 1) + ["total"],
+            y=["[EXPECTED VALUE]"] + final_names[1:] + ["[PREDICTION]"],
+            x=[base_val] + final_vals[1:] + [0], # Plotly calculates the total
+            connector={"line":{"color":"#FCC780"}},
+            increasing={"marker":{"color":"#00E5A8"}},
+            decreasing={"marker":{"color":"#FF4D4D"}},
+            totals={"marker":{"color":"#FCC780"}}
+        ))
+        
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=550,
+            width=710,
+            title=dict(text=f"Local Explanation for {res.get('ticker', 'Latest Symbol')}", font=dict(size=14))
+        )
+        
         return fig
 
     @render.table
@@ -1839,13 +2233,14 @@ def predictive_server(input, output, session):
                 idx_1 = np.where(meta_model.classes_ == 1)[0]
                 if len(idx_1) > 0:
                     meta_sizing = probs[:, idx_1[0]]
+                    meta_sizing = np.clip((2 * meta_sizing - 1) * 2, 0, 1)
             
             if is_classification:
                 bt['Raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0) + np.where(bt['Pred'] == -1, -bt['Ret'], 0)
             else:
                 bt['Raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0) + np.where(bt['Pred'] < 0, -bt['Ret'], 0)
             
-            bt['Meta'] = bt['Raw'] * (meta_sizing - 0.5) * 4
+            bt['Meta'] = bt['Raw'] * meta_sizing
             bt['Meta'] = np.clip(bt['Meta'], -1, 1)
             
             def get_stats(series, label):
@@ -1873,19 +2268,23 @@ def predictive_server(input, output, session):
             ])
         
         df = df.sort_values("Sharpe", ascending=False).reset_index(drop=True)
-        df.set_index("Strategy", inplace=True)
         
         styled = (
             df.style
+            .hide_index()
             .format({
                 "Total Profits": "{:+.2%}",
                 "Win Rate": "{:.1%}",
-                "Trades": "{:.0f}",
+                "Trades": "{:.0f}", 
                 "Sharpe": "{:.2f}",
                 "Max Drawdown": "{:.2f}%"
             })
-            .set_properties(**{"font-size": "13px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}])
+            .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+            .set_table_styles([
+                {"selector": "th", "props": [("color", "#000000"), ("background-color", "#FCC780"), ("border", "1px solid #1a4da3"), ("text-transform", "uppercase"), ("font-weight", "700")]},
+                {"selector": "td", "props": [("padding", "8px"), ("border", "1px solid #1a4da3")]},
+                {"selector": "table", "props": [("border-collapse", "collapse"), ("border", "2px solid #1a4da3"), ("width", "100%")]}
+            ])
         )
         return styled
 
@@ -1908,7 +2307,13 @@ def predictive_server(input, output, session):
                     z=cm,
                     x=labels,
                     y=labels[::-1],
-                    colorscale=[[0, "#2a2a2a"], [1, "#72efdd"]],
+                    colorscale = [
+                        [0.0, "#8B0000"],   # dark red
+                        [0.25, "#FF073A"],  # neon red
+                        [0.5, "#FFAA00"],   # neon orange/yellow
+                        [0.75, "#00FF7F"],  # neon green
+                        [1.0, "#00B200"]    # deep green
+                    ],
                     showscale=True,
                     hoverinfo="skip"
                 )
@@ -1928,9 +2333,13 @@ def predictive_server(input, output, session):
 
             fig.update_layout(
                 template="plotly_dark",
-                height=200,
-                autosize=False,
+                height=300,
                 margin=dict(t=18, b=2, l=2, r=2),
+                paper_bgcolor="#0b3d91",
+                plot_bgcolor="#0b3d91",
+                font=dict(family="Space Mono", color="white"),
+                xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+                yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
                 dragmode=False
             )
 
@@ -1964,9 +2373,13 @@ def predictive_server(input, output, session):
 
         fig.update_layout(
             template="plotly_dark",
-            height=200,
-            autosize=False,
+            height=300,
             margin=dict(t=18, b=2, l=2, r=2),
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
             dragmode=False
         )
 
@@ -2003,21 +2416,24 @@ def predictive_server(input, output, session):
         else:
             return None
 
-        fig = go.Figure(
-            go.Bar(
-                x=x_vals,
-                y=y_vals,
-                orientation="h",
-                marker=dict(color="#4cc9f0"),
-                hoverinfo="skip"
-            )
+        fig = px.bar(
+            x=x_vals,
+            y=y_vals,
+            orientation="h",
+            color=y_vals,  # numeric values mapped
+            template="plotly_dark",
+            color_continuous_scale="Viridis"
         )
 
         fig.update_layout(
             template="plotly_dark",
-            height=200,
-            autosize=False,
+            height=300,
             margin=dict(t=18, b=2, l=2, r=2),
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
             dragmode=False
         )
 
@@ -2055,13 +2471,13 @@ def predictive_server(input, output, session):
 
         total = summary["Count"].sum()
         summary["Pct"] = ((summary["Count"] / total) * 100).round(1)
-        summary.set_index("Regime", inplace=True)
         
         styled = (
             summary.style
+            .hide_index()
             .format({"Count": "{:.0f}", "Pct": "{:.1f}%"})
-            .set_properties(**{"font-size": "14px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+            .set_properties(**{"font-size": "11px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "11px"), ("text-align", "center")]}])
         )
         return styled
 
@@ -2087,21 +2503,21 @@ def predictive_server(input, output, session):
 
         total = summary["Count"].sum()
         summary["Pct"] = ((summary["Count"] / total) * 100).round(1)
-        summary.set_index("Regime", inplace=True)
         
         styled = (
             summary.style
+            .hide_index()
             .format({"Count": "{:.0f}", "Pct": "{:.1f}%"})
-            .set_properties(**{"font-size": "14px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "14px"), ("text-align", "center")]}])
+            .set_properties(**{"font-size": "11px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "11px"), ("text-align", "center")]}])
         )
         return styled
 
     @render_widget
     def engineering_dist_plot():
         res = engineering_result()
-        if res is None: return go.Figure()
-        
+        if res is None: return None
+
         datasets = []
         labels = []
         
@@ -2113,25 +2529,43 @@ def predictive_server(input, output, session):
                     datasets.append(rets.values)
                     labels.append(k.capitalize() + " Bars")
                     
-        if not datasets: return go.Figure()
-        
-        # Use distplot from figure_factory for a nice visual comparison
-        fig = ff.create_distplot(datasets, labels, bin_size=.001, show_hist=True, show_curve=True)
-        
+        if not datasets: return None
+
+        # Correct palette source
+        base_colors = pc.diverging.Spectral_r
+        colors = base_colors[:len(datasets)]
+
+        fig = ff.create_distplot(
+            datasets,
+            labels,
+            bin_size=.001,
+            show_hist=True,
+            show_curve=True,
+            colors=colors
+        )
+
         fig.update_layout(
             template="plotly_dark",
-            height=400,
+            height=390,
+            width=965,
             margin=dict(t=40, b=60, l=30, r=30),
             legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
             xaxis_title="Log Returns",
-            yaxis_title="Density"
+            yaxis_title="Density",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
         )
+        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
         return fig
 
     @render_widget
     def engineering_cum_plot():
         res = engineering_result()
-        if res is None: return go.Figure()
+        if res is None: return None
         
         fig = go.Figure()
         colors = {"time": "#9AA0A6", "volume": "#00E5A8", "dollar": "#FFA726"}
@@ -2150,11 +2584,16 @@ def predictive_server(input, output, session):
         fig.update_layout(
             template="plotly_dark",
             height=400,
-            autosize=False,
+            width=965,
             margin=dict(t=40, b=60, l=30, r=30),
             legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
             xaxis_title=None,
-            yaxis_title="Cumulative Log Return"
+            yaxis_title="Cumulative Log Return",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)"),
         )
         return fig
 
@@ -2191,10 +2630,10 @@ def predictive_server(input, output, session):
         for col in ["Mean", "Std", "Min", "Max", "Skew", "Kurtosis"]:
             df_stats[col] = df_stats[col].map(lambda x: f"{x:.5f}")
             
-        df_stats.set_index("Type", inplace=True)
         styled = (
             df_stats.style
-            .set_properties(**{"font-size": "13px", "text-align": "center"})
-            .set_table_styles([{"selector": "th", "props": [("font-size", "13px"), ("text-align", "center")]}])
+            .hide_index()
+            .set_properties(**{"font-size": "11px", "text-align": "center"})
+            .set_table_styles([{"selector": "th", "props": [("font-size", "11px"), ("text-align", "center")]}])
         )
         return styled

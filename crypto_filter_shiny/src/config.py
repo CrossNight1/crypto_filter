@@ -3,10 +3,13 @@ Application Configuration
 Update this file to change titles, descriptions, symbols, and links.
 """
 
+
 # --- APP SETTINGS ---
 APP_TITLE = "Crypto Market Radar"
-APP_ICON = "LEO" # Using a standard icon name if possible, or leave as text
+APP_ICON = "LEO"
 APP_LAYOUT = "wide"
+THEME = "quartz"
+BG_COLOR = "#1a1a1a"
 
 # --- SIDEBAR & WELCOME ---
 SIDEBAR_INFO = "Select a module to proceed"
@@ -24,7 +27,7 @@ This application allows you to analyze Binance Perpetual Futures with advanced s
 
 # --- DATA SETTINGS ---
 # Symbols that are always fetched
-MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'LINKUSDT']
+MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'METISUSDT']
 
 # Benchmark used for Relative Strength and Beta
 BENCHMARK_SYMBOL = 'BTCUSDT'
@@ -77,12 +80,12 @@ ALL_METRICS = [
     'beta', 'alpha', 'volatility', 'sharpe', 'fip', 
     'metric_return', 'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
     'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
-    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar'
+    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance'
 ]
 
 DEFAULT_FEATURES = [
-    'volatility', 'sharpe',
+    'volatility',
     'ewva', 'vol_imbalance',
-    'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
+    'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'vam', 'skewness',
     'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar'
 ]
