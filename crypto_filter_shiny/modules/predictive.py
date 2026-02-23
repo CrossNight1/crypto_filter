@@ -2307,13 +2307,7 @@ def predictive_server(input, output, session):
                     z=cm,
                     x=labels,
                     y=labels[::-1],
-                    colorscale = [
-                        [0.0, "#8B0000"],   # dark red
-                        [0.25, "#FF073A"],  # neon red
-                        [0.5, "#FFAA00"],   # neon orange/yellow
-                        [0.75, "#00FF7F"],  # neon green
-                        [1.0, "#00B200"]    # deep green
-                    ],
+                    colorscale="Spectral_r",
                     showscale=True,
                     hoverinfo="skip"
                 )
@@ -2422,7 +2416,7 @@ def predictive_server(input, output, session):
             orientation="h",
             color=y_vals,  # numeric values mapped
             template="plotly_dark",
-            color_continuous_scale="Viridis"
+            color_continuous_scale="Spectral_r"
         )
 
         fig.update_layout(

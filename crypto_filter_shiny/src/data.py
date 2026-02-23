@@ -264,6 +264,34 @@ class DataManager:
             self._cache.pop(cache_key, None)
         else:
             self._cache.clear()
+            
+    def delete_data(self, interval: str = "ALL"):
+        """Deletes cached files for a specific interval or all data."""
+        files = os.listdir(self.data_dir)
+        deleted_count = 0
+        for f in files:
+            if not f.endswith(".parquet"):
+                continue
+            
+            should_delete = False
+            if interval == "ALL":
+                should_delete = True
+            else:
+                # format: SYMBOL_INTERVAL.parquet
+                name = f.replace(".parquet", "")
+                parts = name.split('_')
+                if len(parts) >= 2 and parts[-1] == interval:
+                    should_delete = True
+            
+            if should_delete:
+                try:
+                    os.remove(os.path.join(self.data_dir, f))
+                    deleted_count += 1
+                except Exception as e:
+                    logger.error(f"Error deleting {f}: {e}")
+        
+        self.clear_cache()
+        return deleted_count
         
     def get_existing_symbols(self) -> List[str]:
         # Legacy support or simple list

@@ -9,6 +9,7 @@ from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS, AVAILABLE_INTERVALS
 from src.logger import logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def market_radar_ui():
     return ui.navset_card_underline(
@@ -73,7 +74,12 @@ def market_radar_ui():
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
-
+                    ui.input_text(
+                        "focus_symbol",
+                        "Focus Symbol",
+                        value="",
+                        placeholder="e.g. BTCUSDT"
+                    ),
                     ui.input_switch(
                         "drop_zeros",
                         "Exclude Zero Metrics",
@@ -219,6 +225,7 @@ def market_radar_server(input, output, session, global_interval):
     
     snapshot_data = reactive.Value(pd.DataFrame())
     rpg_data = reactive.Value(pd.DataFrame())
+    selected_symbol_data = reactive.Value(None)
 
     logger.log("Market Radar", "INFO", "Server initialized")
 
@@ -228,6 +235,13 @@ def market_radar_server(input, output, session, global_interval):
         inventory = manager.get_inventory()
         available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
         ui.update_selectize("exclude_symbols", choices=available_syms, selected=input.exclude_symbols())
+
+    @reactive.effect
+    def _sync_focus_symbol():
+        """Sync focus_symbol input with selected_symbol_data"""
+        symbol = input.focus_symbol().strip().upper()
+        if symbol:
+            selected_symbol_data.set(symbol)
 
     @reactive.effect
     @reactive.event(input.btn_calc_snapshot)
@@ -246,7 +260,7 @@ def market_radar_server(input, output, session, global_interval):
                 return
 
             with ui.Progress(min=0, max=len(symbols)) as p:
-                p.set(message="Analyzing Market Data...")
+                p.set(message="Analyzing...")
                 
                 # 1. Prepare Benchmark once
                 benchmark_df = manager.load_data(BENCHMARK_SYMBOL, interval)
@@ -255,33 +269,46 @@ def market_radar_server(input, output, session, global_interval):
                     b_close = pd.to_numeric(benchmark_df['close'], errors='coerce').ffill().fillna(0)
                     benchmark_returns = b_close.pct_change().dropna()
                 
-                results = []
-                for i, sym in enumerate(symbols):
-                    sym = sym if sym not in input.exclude_symbols() else None
-                    if sym is None:
-                        continue
+                # Pulse reactive inputs once here to avoid "No current reactive context" in threads
+                filter_window = input.filter_window()
+                exclude_list = list(input.exclude_symbols())
 
-                    df = manager.load_data(sym, interval)
-                    if df is not None and not df.empty:
-                        # Compute metrics for this symbol alone
-                        try:
-                            # Use engine to compute for single symbol
-                            # We wrap it in a dict to reuse existing compute_all_metrics logic for now,
-                            # or better, compute directly for this symbol.
-                            single_res = engine.compute_all_metrics(
+                def process_symbol(sym):
+                    try:
+                        df = manager.load_data(sym, interval)
+                        if df is not None and not df.empty:
+                            return engine.compute_all_metrics(
                                 {sym: df}, 
                                 interval=interval, 
                                 benchmark_symbol=BENCHMARK_SYMBOL,
                                 benchmark_returns=benchmark_returns,
-                                window=input.filter_window()
+                                window=filter_window
                             )
-                            if not single_res.empty:
+                    except Exception as e:
+                        logger.log("Market Radar", "ERROR", f"Error computing {sym}: {e}")
+                    return None
+
+                results = []
+                # Use a reasonable number of workers (e.g., 10-20 for I/O bound tasks like loading data)
+                with ThreadPoolExecutor(max_workers=50) as executor:
+                    # Filter out excluded symbols before submitting
+                    active_symbols = [s for s in symbols if s not in exclude_list]
+                    
+                    # Submit all tasks
+                    future_to_sym = {executor.submit(process_symbol, sym): sym for sym in active_symbols}
+                    
+                    # Process as they complete to update progress bar
+                    for i, future in enumerate(as_completed(future_to_sym)):
+                        sym = future_to_sym[future]
+                        try:
+                            single_res = future.result()
+                            if single_res is not None and not single_res.empty:
                                 results.append(single_res.iloc[0])
                         except Exception as e:
-                            logger.log("Market Radar", "ERROR", f"Error computing {sym}: {e}")
-                    
-                    p.set(i + 1, detail=f"Processed {sym}")
-                    await reactive.flush()
+                            logger.log("Market Radar", "ERROR", f"Future error for {sym}: {e}")
+                        
+                        p.set(i + 1, detail=f"Processed {sym}")
+                        await reactive.flush()
                 
                 if not results:
                     ui.notification_show("Failed to compute metrics for any symbols.", type="error")
@@ -343,13 +370,15 @@ def market_radar_server(input, output, session, global_interval):
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
                 hover_name='symbol', log_x=input.x_log(), log_y=input.y_log(),
                 color_continuous_scale='Spectral_r',
-                template="plotly_dark"
+                template="plotly_dark",
+                custom_data=['symbol']  # Add symbol to custom data for click events
             )
         else:
             fig = px.scatter(
                 plot_df, x=x, y=y, hover_name='symbol',
                 log_x=input.x_log(), log_y=input.y_log(),
-                template="plotly_dark"
+                template="plotly_dark",
+                custom_data=['symbol']  # Add symbol to custom data for click events
             )
             
         fig.update_layout(
@@ -360,12 +389,153 @@ def market_radar_server(input, output, session, global_interval):
             plot_bgcolor="#0b3d91",
             font=dict(family="Space Mono", color="white"),
             xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
-            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)")
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
+            clickmode='event+select'  # Enable click events
+        )
+        
+        focus_sym = input.focus_symbol().strip().upper()
+        selected_points = None
+        unselected_opacity = 0.2
+
+        if focus_sym and focus_sym in plot_df['symbol'].str.upper().values:
+            pos_idx = list(plot_df['symbol'].str.upper()).index(focus_sym)
+            selected_points = [pos_idx]
+
+        fig.update_traces(
+            hovertemplate='<b>%{hovertext}</b><br>' +
+                        f'{METRIC_LABELS.get(x, x)}: %{{x}}<br>' +
+                        f'{METRIC_LABELS.get(y, y)}: %{{y}}<br>' +
+                        '<extra></extra>',
+            selectedpoints=selected_points,
+            selected=dict(
+                marker=dict(
+                    color='#FF3B3B',
+                    size=15,
+                    opacity=1
+                )
+            ),
+            unselected=dict(
+                marker=dict(
+                    opacity=unselected_opacity
+                )
+            )
         )
 
         fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
         fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
         return fig
+    
+    @reactive.effect
+    @reactive.event(input.snapshot_chart_click)
+    def _handle_chart_click():
+        """Handle click events on the snapshot chart"""
+        click_data = input.snapshot_chart_click()
+        
+        if click_data is None:
+            return
+        
+        logger.log("Market Radar", "INFO", f"Chart click event: {click_data}")
+        
+        # Extract the clicked point data
+        try:
+            # Plotly click data structure: {'points': [{'customdata': [...], ...}]}
+            if 'points' in click_data and len(click_data['points']) > 0:
+                point = click_data['points'][0]
+                
+                # Get symbol from customdata or hovertext
+                if 'customdata' in point and point['customdata']:
+                    symbol = point['customdata'][0]
+                elif 'hovertext' in point:
+                    symbol = point['hovertext']
+                else:
+                    logger.log("Market Radar", "WARNING", "No symbol found in click data")
+                    return
+                
+                logger.log("Market Radar", "INFO", f"Selected symbol: {symbol}")
+                selected_symbol_data.set(symbol)
+                
+                # Update Focus Symbol input box
+                ui.update_text("focus_symbol", value=symbol)
+        except Exception as e:
+            logger.log("Market Radar", "ERROR", f"Error handling chart click: {e}")
+
+    @render.ui
+    def selected_symbol_info():
+        """Display information about the selected symbol from chart click"""
+        selected = selected_symbol_data.get()
+        
+        if selected is None:
+            return ui.div(
+                ui.p("Click on a point in the chart above to see detailed metrics", 
+                     class_="text-muted text-center",
+                     style="padding: 20px;")
+            )
+        
+        # Get the full row data for the selected symbol
+        df = snapshot_data.get()
+        if df.empty:
+            return ui.div(ui.p("No data available", class_="text-muted"))
+        
+        symbol_row = df[df['symbol'] == selected]
+        if symbol_row.empty:
+            return ui.div(ui.p(f"Symbol {selected} not found", class_="text-muted"))
+        
+        row = symbol_row.iloc[0]
+        
+        # Create a formatted display of all metrics
+        metrics_html = f"""
+        <div style="padding: 15px;">
+            <h4 style="color: #FFD700; margin-bottom: 15px;">
+                {selected}
+                <a href="{BINANCE_URL}{selected}" target="_blank" 
+                   style="font-size: 0.8em; margin-left: 10px; color: #1f77b4;">
+                    📊 View on Binance
+                </a>
+            </h4>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+        """
+        
+        # Add all metrics
+        for col in df.columns:
+            if col != 'symbol':
+                value = row[col]
+                label = METRIC_LABELS.get(col, col)
+                
+                # Format the value
+                if isinstance(value, (int, float)):
+                    if abs(value) < 0.01:
+                        formatted_value = f"{value:.6f}"
+                    elif abs(value) < 1:
+                        formatted_value = f"{value:.4f}"
+                    else:
+                        formatted_value = f"{value:.2f}"
+                    
+                    # Color code based on value
+                    if value > 0:
+                        color = "#4ade80"  # green
+                    elif value < 0:
+                        color = "#f87171"  # red
+                    else:
+                        color = "#94a3b8"  # gray
+                else:
+                    formatted_value = str(value)
+                    color = "#94a3b8"
+                
+                metrics_html += f"""
+                <div style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 5px;">
+                    <div style="font-size: 0.85em; color: #94a3b8;">{label}</div>
+                    <div style="font-size: 1.1em; font-weight: bold; color: {color}; font-family: 'Space Mono', monospace;">
+                        {formatted_value}
+                    </div>
+                </div>
+                """
+        
+        metrics_html += """
+            </div>
+        </div>
+        """
+        
+        return ui.HTML(metrics_html)
 
     @reactive.effect
     def _():

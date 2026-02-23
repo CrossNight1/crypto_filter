@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from src.data import BinanceFuturesFetcher, DataManager
 from src.config import AVAILABLE_INTERVALS, DEFAULT_FETCH_INTERVALS, MANDATORY_CRYPTO
+import asyncio
 
 def data_loader_ui():
     return ui.page_fluid(
@@ -81,6 +82,14 @@ def data_loader_ui():
                         "Execute",
                         class_="btn-primary w-100 mt-1"
                     )
+                ),
+                ui.card(
+                    ui.card_header("Data Management"),
+                    ui.layout_columns(
+                        ui.input_select("delete_interval", "Select Interval", ["ALL"] + AVAILABLE_INTERVALS),
+                        ui.input_action_button("btn_delete", "Delete Data", class_="btn-outline-danger w-100 mt-4"),
+                        col_widths=[7, 5]
+                    )
                 )
             )
         ),
@@ -112,7 +121,8 @@ def data_loader_server(input, output, session):
         with ui.Progress(min=1, max=15) as p:
             p.set(message="Fetching top symbols...", detail="Please wait")
             new_syms = fetcher.get_top_volume_symbols(top_n=input.top_n())
-            selected_symbols.set(selected_symbols.get().union(new_syms))
+            # Ensure MANDATORY_CRYPTO are always included when filtering
+            selected_symbols.set(set(MANDATORY_CRYPTO).union(new_syms))
 
     @reactive.effect
     @reactive.event(input.btn_add)
@@ -170,23 +180,26 @@ def data_loader_server(input, output, session):
         if not selected_symbols.get():
             ui.notification_show("Select symbols", type="error")
             return
-            
+
         logs.set([])
         is_fetching.set(True)
         progress.set(0.0)
-        
+
         all_syms = sorted(list(selected_symbols.get()))
-        total = len(all_syms) * len(input.intervals())
+        intervals = input.intervals()
+        total = len(all_syms) * len(intervals)
         count_done = 0
-        
         current_logs = []
-        
-        for sym in all_syms:
-            for inter in input.intervals():
+
+        max_workers = 5  # concurrency threshold
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def fetch_and_save(sym, inter):
+            nonlocal count_done
+            async with semaphore:
                 now_str = datetime.now().strftime('%H:%M:%S')
                 current_logs.append(f"[{now_str}] {sym} {inter}...")
                 logs.set(current_logs[:])
-                
                 try:
                     if input.fetch_mode() == "Range":
                         end_t = datetime.now()
@@ -194,7 +207,7 @@ def data_loader_server(input, output, session):
                         df = fetcher.fetch_history(sym, inter, start_time=start_t, end_time=end_t)
                     else:
                         df = fetcher.fetch_candles(sym, inter, limit=input.limit())
-                    
+
                     if not df.empty:
                         manager.save_data(df, sym, inter)
                         current_logs.append(f"  > Saved {len(df)} candles")
@@ -202,11 +215,47 @@ def data_loader_server(input, output, session):
                         current_logs.append(f"  ! Missing data")
                 except Exception as e:
                     current_logs.append(f"  ! Error: {str(e)}")
-                
+
                 count_done += 1
                 progress.set(count_done / total)
                 logs.set(current_logs[:])
                 await reactive.flush()
-        
+
+        tasks = [fetch_and_save(sym, inter) for sym in all_syms for inter in intervals]
+        await asyncio.gather(*tasks)
+
         is_fetching.set(False)
         ui.notification_show("Sync Complete", type="message")
+
+    @reactive.effect
+    @reactive.event(input.btn_delete)
+    def _():
+        m = ui.modal(
+            ui.p(f"Are you sure you want to delete cached data for: {input.delete_interval()}?"),
+            ui.p("This action cannot be undone.", class_="text-danger"),
+            title="Confirm Deletion",
+            footer=ui.div(
+                ui.modal_button("Cancel"),
+                ui.input_action_button("btn_confirm_delete", "Yes, Delete", class_="btn-danger")
+            ),
+            easy_close=True
+        )
+        ui.modal_show(m)
+
+    @reactive.effect
+    @reactive.event(input.btn_confirm_delete)
+    def _():
+        ui.modal_remove()
+        interval = input.delete_interval()
+        
+        try:
+            count = manager.delete_data(interval)
+            ui.notification_show(f"Successfully deleted {count} files for {interval}", type="message")
+            
+            # Update logs
+            now_str = datetime.now().strftime('%H:%M:%S')
+            current_logs = logs.get()
+            current_logs.append(f"[{now_str}] Deleted {count} files for {interval}")
+            logs.set(current_logs[:])
+        except Exception as e:
+            ui.notification_show(f"Deletion error: {str(e)}", type="error")
