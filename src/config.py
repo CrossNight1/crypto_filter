@@ -3,10 +3,13 @@ Application Configuration
 Update this file to change titles, descriptions, symbols, and links.
 """
 
+
 # --- APP SETTINGS ---
 APP_TITLE = "Crypto Market Radar"
-APP_ICON = "chart_with_upwards_trend" # Using a standard icon name if possible, or leave as text
+APP_ICON = "LEO"
 APP_LAYOUT = "wide"
+THEME = "quartz"
+BG_COLOR = "#1a1a1a"
 
 # --- SIDEBAR & WELCOME ---
 SIDEBAR_INFO = "Select a module to proceed"
@@ -24,7 +27,7 @@ This application allows you to analyze Binance Perpetual Futures with advanced s
 
 # --- DATA SETTINGS ---
 # Symbols that are always fetched
-MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'LINAUSDT']
+MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'METISUSDT', 'BTCDOMUSDT']
 
 # Benchmark used for Relative Strength and Beta
 BENCHMARK_SYMBOL = 'BTCUSDT'
@@ -66,14 +69,23 @@ METRIC_LABELS = {
     'return_lag2': 'Return Lag 2',
     'return_lag3': 'Return Lag 3',
     'autocorr_5': 'Autocorr (5)',
+    'ewma': 'EWMA (Price Norm)',
+    'imbalance_bar': 'Imbalance Bar',
+    'vol_imbalance': 'Volatility Imbalance',
     'None': 'None'
 }
 
 # List of all available numeric metrics for axes
 ALL_METRICS = [
-    'beta', 'alpha', 'volatility', 'sharpe', 'fip', 'return', 
+    'beta', 'alpha', 'volatility', 'sharpe', 'fip', 
     'metric_return', 'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
-    'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 
-    'rel_strength_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
-    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma'
+    'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
+    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance'
+]
+
+DEFAULT_FEATURES = [
+    'volatility',
+    'ewva', 'vol_imbalance',
+    'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'vam', 'skewness',
+    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar'
 ]

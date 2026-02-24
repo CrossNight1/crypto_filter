@@ -12,6 +12,9 @@ class MetricsEngine:
     """Calculates metrics from price data using vectorized operations."""
     TICKER_24H = "/fapi/v1/ticker/24hr"
     
+    def __init__(self):
+        self._results_cache = {} # Key: (symbol, interval, last_timestamp, length)
+    
     @staticmethod
     def get_annual_scaling(interval: str) -> float:
         """
@@ -80,8 +83,8 @@ class MetricsEngine:
     @staticmethod
     def rsi(series: pd.Series, n: int = 14) -> pd.Series:
         delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=n).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=n).mean()
+        gain = (delta.where(delta > 0, 0)).ewm(span=n, min_periods=n).mean()
+        loss = (-delta.where(delta < 0, 0)).ewm(span=n, min_periods=n).mean()
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
@@ -91,20 +94,20 @@ class MetricsEngine:
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(window=n).mean()
+        return tr.ewm(span=n, min_periods=n).mean()
 
     @staticmethod
     def bollinger_bands(series: pd.Series, n: int = 20, k: float = 2.0) -> tuple:
-        ma = series.rolling(window=n).mean()
-        std = series.rolling(window=n).std()
+        ma = series.ewm(span=n).mean()
+        std = series.ewm(span=n).std()
         upper = ma + (k * std)
         lower = ma - (k * std)
         return upper, lower, ma
 
     @staticmethod
     def aroon(high: pd.Series, low: pd.Series, n: int = 25) -> tuple:
-        aroon_up = high.rolling(window=n+1).apply(lambda x: float(np.argmax(x)) / n * 100, raw=True)
-        aroon_down = low.rolling(window=n+1).apply(lambda x: float(np.argmin(x)) / n * 100, raw=True)
+        aroon_up = high.rolling(n+1).apply(lambda x: float(np.argmax(x)) / n * 100, raw=True)
+        aroon_down = low.rolling(n+1).apply(lambda x: float(np.argmin(x)) / n * 100, raw=True)
         return aroon_up, aroon_down
 
     @staticmethod
@@ -113,7 +116,7 @@ class MetricsEngine:
         return (tp * df['volume']).cumsum() / df['volume'].cumsum()
 
     @staticmethod
-    def calculate_all_indicators(df: pd.DataFrame, benchmark_returns: pd.Series = None) -> pd.DataFrame:
+    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, interval: str = '1h') -> pd.DataFrame:
         """
         Calculates all 11 advanced metrics requested by the user.
         Returns a DataFrame with the same index as the input df.
@@ -124,36 +127,40 @@ class MetricsEngine:
         low = df['low']
         volume = df['volume']
         
-        # 1. EWVA: (EMA20 - EMA50) / STD(price)
-        ema40 = MetricsEngine.ema(close, 40)
-        ema100 = MetricsEngine.ema(close, 100)
-        std_p = close.rolling(40).std()
-        res['ewva'] = (ema40 - ema100) / std_p
+        # Scaling factors for related windows
+        w_slow = int(window * 2.5)
+        w_short = max(2, int(window * 0.35))
+        w_mid = max(3, int(window * 0.6))
+
+        # 1. EWVA: (EMA_fast - EMA_slow) / STD(price)
+        ema_f = MetricsEngine.ema(close, window)
+        ema_s = MetricsEngine.ema(close, w_slow)
+        std_p = close.ewm(span=window).std()
+        res['ewva'] = (ema_f - ema_s) / std_p
         
         # 2. Aroon Oscillator: (AroonUp - AroonDown) / 100
-        au, ad = MetricsEngine.aroon(high, low, 25)
+        au, ad = MetricsEngine.aroon(high, low, w_mid)
         res['aroon_osc'] = (au - ad) / 100
         
         # 3. Bollinger Band Position (BBP): (Close - LowerBB) / (UpperBB - LowerBB)
-        ubb, lbb, _ = MetricsEngine.bollinger_bands(close, 40, 2.0)
+        ubb, lbb, _ = MetricsEngine.bollinger_bands(close, window, 2.0)
         bb_range = (ubb - lbb).replace(0, 1e-9)
         res['bbp'] = (close - lbb) / bb_range
         
         # 4. RSI (Normalized): RSI / 100
-        res['rsi_norm'] = MetricsEngine.rsi(close, 40) / 100
+        res['rsi_norm'] = MetricsEngine.rsi(close, window) / 100
         
         # 5. Return Z-Score: (Return - mean(Return)) / std(Return)
         ret = close.pct_change()
-        res['return_z'] = (ret - ret.rolling(40).mean()) / ret.rolling(40).std()
+        res['return_z'] = (ret - ret.ewm(span=window).mean()) / ret.ewm(span=window).std()
         
         # 6. Normalized ATR: ATR / Close
-        res['atr_norm'] = MetricsEngine.atr(high, low, close, 14) / close.replace(0, 1e-9)
+        res['atr_norm'] = MetricsEngine.atr(high, low, close, w_short) / close.replace(0, 1e-9)
         
         # 7. Chaikin Money Flow (CMF)
-        # Formula: ((Close - Low) - (High - Close)) / (High - Low) * Volume -> then 20-period sum
         mfm = ((close - low) - (high - close)) / (high - low).replace(0, 1e-9)
         mfv = mfm * volume
-        res['cmf'] = mfv.rolling(40).sum() / volume.rolling(40).sum()
+        res['cmf'] = mfv.ewm(span=window).sum() / volume.ewm(span=window).sum()
         
         # 8. VWAP Deviation Z-Score: (Close - VWAP) / STD(price)
         vwp = MetricsEngine.vwap(df)
@@ -164,17 +171,17 @@ class MetricsEngine:
             # Align indices
             common_idx = ret.index.intersection(benchmark_returns.index)
             diff = ret.loc[common_idx] - benchmark_returns.loc[common_idx]
-            res['rel_strength_z'] = (diff - diff.rolling(40).mean()) / diff.rolling(40).std()
+            res['rel_strength_z'] = (diff - diff.ewm(span=window).mean()) / diff.ewm(span=window).std()
         else:
             res['rel_strength_z'] = np.nan
             
         # 10. Volatility-Adjusted Momentum (VAM): ROC / (ATR / Close)
-        roc = close.pct_change(14)
+        roc = close.pct_change(w_short)
         atr_norm = res['atr_norm']
         res['vam'] = roc / atr_norm
         
         # 11. Return Skewness (Rolling)
-        res['skewness'] = ret.rolling(40).skew()
+        res['skewness'] = ret.rolling(window).skew()
         
         # 12. Lagged Returns
         res['return_lag1'] = ret.shift(1)
@@ -186,8 +193,43 @@ class MetricsEngine:
         res['autocorr_5'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
         
         # 14. EWMA (Simple EMA of price normalized by price)
-        res['ewma'] = MetricsEngine.ema(close, 20) / close
+        res['ewma'] = MetricsEngine.ema(close, window) / close
         
+        # 15. Imbalance Bar
+        body = (close - df['open']).abs()
+        rng = (high - low).abs().replace(0, 1e-9)
+        res['imbalance_bar'] = (body / rng) * np.sign(ret).fillna(0)
+        
+        # --- Standard/Legacy Metrics for Snapshot/Table use ---
+        ann_factor = MetricsEngine.get_annual_scaling(interval)
+        
+        # Sharpe & Volatility
+        res['sharpe'] = (ret.ewm(span=window).mean() / ret.ewm(span=window).std()) * np.sqrt(ann_factor)
+        res['volatility'] = ret.ewm(span=window).std() * np.sqrt(ann_factor)
+        res['vol_imbalance'] = ret.ewm(span=window).std() / ret.ewm(span=window * 10).std()
+        
+        # FIP (Frog-in-the-Pan)
+        def fip_func(x):
+            total_ret = np.sum(x)
+            sign_ret = np.sign(total_ret)
+            n = len(x)
+            neg_pct = np.sum(x < 0) / n
+            pos_pct = np.sum(x > 0) / n
+            return sign_ret * (neg_pct - pos_pct)
+        res['fip'] = ret.rolling(window).apply(fip_func, raw=True)
+        
+        # Return
+        res['return'] = ret.ewm(span=window, min_periods=1).sum()
+        
+        # Price Z-Score & SMA Diff
+        res['price_zscore'] = (close - close.ewm(span=window).mean()) / close.ewm(span=window).std()
+        res['price_sma_diff'] = (close - close.ewm(span=window).mean()) / close.replace(0, 1e-9)
+        
+        # ADF Statistics
+        hist, tau, _ = MetricsEngine.calculate_custom_adf_series(close.values, lookback=window)
+        res['adf_hist'] = hist.values
+        res['adf_stat'] = tau.values
+
         return res
 
     @staticmethod
@@ -321,11 +363,11 @@ class MetricsEngine:
         x_s = pd.Series(x)
         
         # Rolling sums with min_periods=1 for robustness
-        sum_x = x_s.rolling(window=lookback, min_periods=1).sum()
-        sum_y = dy_s.rolling(window=lookback, min_periods=1).sum()
-        sum_xx = (x_s**2).rolling(window=lookback, min_periods=1).sum()
-        sum_xy = (x_s * dy_s).rolling(window=lookback, min_periods=1).sum()
-        sum_yy = (dy_s**2).rolling(window=lookback, min_periods=1).sum()
+        sum_x = x_s.ewm(span=lookback, min_periods=1).sum()
+        sum_y = dy_s.ewm(span=lookback, min_periods=1).sum()
+        sum_xx = (x_s**2).ewm(span=lookback, min_periods=1).sum()
+        sum_xy = (x_s * dy_s).ewm(span=lookback, min_periods=1).sum()
+        sum_yy = (dy_s**2).ewm(span=lookback, min_periods=1).sum()
         
         # Helper for vectorized beta, alpha
         denom = lookback * sum_xx - sum_x**2
@@ -366,7 +408,7 @@ class MetricsEngine:
         tau_s = pd.Series(tau).fillna(0)
         
         # Verify: "tauADF := ta.sma(tauADF, 10)"
-        tau_sma = tau_s.rolling(window=10, min_periods=1).mean()
+        tau_sma = tau_s.ewm(span=10, min_periods=1).mean()
         
         # "tauADF_smooth = ta.ema(tauADF, 50)"
         # EMA usually handles NaNs/start better than SMA
@@ -432,6 +474,64 @@ class MetricsEngine:
         return float((mean_ret / std_ret) * np.sqrt(ann_factor))
 
     @staticmethod
+    def calculate_sortino_ratio(log_returns: np.ndarray, target: float = 0.0, interval: str = '1h') -> float:
+        """
+        Sortino Ratio = (Mean Return - Target) / Downside Deviation
+        """
+        if len(log_returns) < 2: return 0.0
+        
+        excess_returns = log_returns - target
+        downside_returns = excess_returns[excess_returns < 0]
+        
+        if len(downside_returns) == 0:
+            return float('inf') if np.mean(excess_returns) > 0 else 0.0
+            
+        downside_std = np.std(downside_returns)
+        if downside_std < 1e-9: return 0.0
+        
+        mean_ret = np.mean(excess_returns)
+        ann_factor = MetricsEngine.get_annual_scaling(interval)
+        
+        return float((mean_ret / downside_std) * np.sqrt(ann_factor))
+
+    @staticmethod
+    def calculate_max_drawdown(prices: np.ndarray) -> float:
+        """
+        Max Drawdown = Min((Price / RunningMax) - 1)
+        """
+        if len(prices) < 2: return 0.0
+        
+        running_max = np.maximum.accumulate(prices)
+        drawdowns = (prices / running_max) - 1
+        return float(np.min(drawdowns))
+
+    @staticmethod
+    def calculate_avg_drawdown(prices: np.ndarray) -> float:
+        """
+        Average of all drawdowns (where DD < 0)
+        """
+        if len(prices) < 2: return 0.0
+        
+        running_max = np.maximum.accumulate(prices)
+        drawdowns = (prices / running_max) - 1
+        
+        # Filter for actual drawdowns
+        negative_dds = drawdowns[drawdowns < 0]
+        if len(negative_dds) == 0: return 0.0
+        
+        return float(np.mean(negative_dds))
+
+    @staticmethod
+    def calculate_win_rate(log_returns: np.ndarray) -> float:
+        """
+        Percentage of positive returns.
+        """
+        if len(log_returns) == 0: return 0.0
+        
+        wins = np.sum(log_returns > 0)
+        return float(wins / len(log_returns))
+
+    @staticmethod
     def calculate_rolling_metric(df: pd.DataFrame, metric_name: str, window: int = 30, step: int = 1, benchmark_returns: pd.Series = None, interval: str = '1h') -> pd.Series:
         """
         Calculates a metric over a rolling window.
@@ -451,11 +551,11 @@ class MetricsEngine:
         new_metrics = [
             'ewva', 'aroon_osc', 'bbp', 'rsi_norm', 'return_z', 'atr_norm', 
             'cmf', 'vwap_z', 'rel_strength_z', 'vam', 'skewness',
-            'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma'
+            'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance'
         ]
         
         if metric_name in new_metrics:
-            all_inds = MetricsEngine.calculate_all_indicators(df, benchmark_returns)
+            all_inds = MetricsEngine.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns)
             res = all_inds[metric_name]
         
         # Legacy/Standard Metrics
@@ -466,12 +566,12 @@ class MetricsEngine:
             ret_s = ret_s.replace([np.inf, -np.inf], np.nan).fillna(0)
             
             if metric_name == 'sharpe':
-                roller = ret_s.rolling(window=window)
+                roller = ret_s.ewm(span=window)
                 ann_factor = MetricsEngine.get_annual_scaling(interval)
                 res = (roller.mean() / roller.std()) * np.sqrt(ann_factor)
             elif metric_name == 'volatility':
                 ann_factor = MetricsEngine.get_annual_scaling(interval)
-                res = ret_s.rolling(window=window).std() * np.sqrt(ann_factor)
+                res = ret_s.ewm(span=window).std() * np.sqrt(ann_factor)
             elif metric_name == 'fip':
                 def fip_func(x):
                     total_ret = np.sum(x)
@@ -480,9 +580,9 @@ class MetricsEngine:
                     neg_pct = np.sum(x < 0) / n
                     pos_pct = np.sum(x > 0) / n
                     return sign_ret * (neg_pct - pos_pct)
-                res = ret_s.rolling(window=window).apply(fip_func, raw=True)
+                res = ret_s.rolling(window).apply(fip_func, raw=True)
             elif metric_name == 'return':
-                 res = ret_s.rolling(window=window, min_periods=1).sum()
+                 res = ret_s.ewm(span=window, min_periods=1).sum()
             elif metric_name == 'adf_hist':
                 hist, _, _ = MetricsEngine.calculate_custom_adf_series(df['close'].values, lookback=window)
                 res = hist
@@ -491,10 +591,10 @@ class MetricsEngine:
                 res = tau
             elif metric_name == 'price_zscore':
                 close_s = pd.to_numeric(df['close'], errors='coerce').ffill()
-                res = (close_s - close_s.rolling(window=window).mean()) / close_s.rolling(window=window).std()
+                res = (close_s - close_s.ewm(span=window).mean()) / close_s.ewm(span=window).std()
             elif metric_name == 'price_sma_diff':
                 close_s = pd.to_numeric(df['close'], errors='coerce').ffill()
-                sma = close_s.rolling(window=window).mean()
+                sma = close_s.ewm(span=window).mean()
                 res = (close_s - sma) / close_s.replace(0, 1e-9)
             else:
                 return pd.Series()
@@ -505,15 +605,14 @@ class MetricsEngine:
             
         return res
 
-    def compute_all_metrics(self, prices_data: Dict[str, pd.DataFrame], interval: str = '1h', benchmark_symbol: str = 'BTCUSDT') -> pd.DataFrame:
+    def compute_all_metrics(self, prices_data: Dict[str, pd.DataFrame], interval: str = '1h', benchmark_symbol: str = 'BTCUSDT', benchmark_returns: Optional[pd.Series] = None, window: int = 40) -> pd.DataFrame:
         """
         Main pipeline to compute metrics for all symbols.
         """
         results = []
         
-        # 1. Prepare Benchmark
-        benchmark_returns = None
-        if benchmark_symbol in prices_data:
+        # 1. Prepare Benchmark if not provided
+        if benchmark_returns is None and benchmark_symbol in prices_data:
             b_df = prices_data[benchmark_symbol]
             b_close = pd.to_numeric(b_df['close'], errors='coerce').ffill().fillna(0)
             benchmark_returns = b_close.pct_change().dropna()
@@ -522,6 +621,13 @@ class MetricsEngine:
             try:
                 if df.empty: continue
                 
+                # Cache Check
+                last_ts = df['open_time'].max() if 'open_time' in df.columns else None
+                cache_key = (symbol, interval, last_ts, len(df))
+                if cache_key in self._results_cache:
+                    results.append(self._results_cache[cache_key])
+                    continue
+
                 # Standardize and clean prices
                 prices = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(0).values.astype(float)
                 if len(prices) < 2: continue
@@ -549,7 +655,7 @@ class MetricsEngine:
                 
                 # 3. ADVANCED METRICS (The 11 new ones)
                 # Calculate all and take the LATEST value for the snapshot
-                adv_df = self.calculate_all_indicators(df, benchmark_returns)
+                adv_df = self.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns)
                 latest_adv = adv_df.iloc[-1].to_dict()
                 
                 # 4. Old Custom ADF (Keeping for compatibility)
@@ -573,6 +679,9 @@ class MetricsEngine:
                 }
                 # Add all new metrics to row
                 row.update(latest_adv)
+                
+                # Store in cache
+                self._results_cache[cache_key] = row
                 results.append(row)
                 
             except Exception as e:

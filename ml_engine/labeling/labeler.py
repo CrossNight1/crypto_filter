@@ -337,7 +337,6 @@ class Labeler:
             sum_x += x
             sum_y += y
             sum_xy += x * y
-            sum_xy += x * x
             sum_xx += x * x
 
             # Need at least 2 points to fit OLS
@@ -406,7 +405,7 @@ class TripleBarrierLabeler:
         else:
             returns = prices.pct_change().fillna(0.0)
 
-        rolling_vol = returns.ewm(self.vol_window).std().fillna(method="bfill").values
+        rolling_vol = returns.ewm(span=self.vol_window).std().fillna(method="bfill").values
         cum_returns = returns.cumsum().values
         labels = np.zeros(n)
 
@@ -433,3 +432,72 @@ class TripleBarrierLabeler:
                 labels[i] = 1 if up_hit[0] < down_hit[0] else -1
 
         return pd.DataFrame({"price": prices, "label": labels})
+
+class CombinedLabeler:
+    """
+    Consensus labeling: TBL verified by Trend.
+    Only assigns a directional label (+1 or -1) if both labelers agree.
+    """
+    def __init__(self, amplitude_threshold, max_inactive_period, vol_window, upper_mult, lower_mult, max_holding):
+        self.trend_labeler = Labeler(amplitude_threshold=amplitude_threshold, max_inactive_period=max_inactive_period)
+        self.tbl_labeler = TripleBarrierLabeler(vol_window=vol_window, upper_mult=upper_mult, lower_mult=lower_mult, max_holding_period=max_holding)
+
+    def label(self, prices):
+        # 1. Run individual labelers
+        res_trend = self.trend_labeler.label(prices)
+        res_tbl = self.tbl_labeler.label(prices)
+        
+        # 2. Extract labels
+        y_trend = res_trend['label'].values
+        y_tbl = res_tbl['label'].values
+        
+        # 3. Consensus Logic: 
+        # If both are same sign and non-zero, keep. Otherwise 0.
+        combined = np.where(
+            (np.sign(y_trend) == np.sign(y_tbl)) & (y_trend != 0),
+            y_trend,
+            0.0
+        )
+        
+        return pd.DataFrame({"price": prices.values, "label": combined}, index=prices.index)
+
+class TailSetLabeler:
+    def __init__(self, std_window=100, ret_window=1, threshold=1.0, min_periods=None, eps=1e-12):
+        self.std_window = std_window
+        self.ret_window = ret_window
+        self.threshold = threshold
+        self.min_periods = min_periods if min_periods is not None else std_window
+        self.eps = eps
+
+    def label(self, prices):
+        prices = pd.Series(prices).astype(float).dropna().reset_index(drop=True)
+
+        if len(prices) < 2:
+            return pd.DataFrame({"price": prices, "label": np.zeros(len(prices))})
+
+        log_rets = np.log(prices).diff()
+
+        if self.ret_window > 1:
+            ret_series = log_rets.rolling(self.ret_window, min_periods=self.ret_window).sum()
+        else:
+            ret_series = log_rets
+
+        rolling_std = ret_series.rolling(self.std_window, min_periods=self.min_periods).std()
+        rolling_std = rolling_std.clip(lower=self.eps)
+
+        upper = self.threshold * rolling_std
+        lower = -self.threshold * rolling_std
+
+        labels = np.zeros(len(prices))
+        labels[ret_series > upper] = 1
+        labels[ret_series < lower] = -1
+
+        return pd.DataFrame(
+            {
+                "price": prices,
+                "label": labels,
+                "ret": ret_series,
+                "rolling_std": rolling_std
+            },
+            index=prices.index,    
+        )

@@ -12,7 +12,7 @@ class Predictor:
         self.model = model
         self.model_type = model_type
         self.scaler = scaler
-        self.is_sklearn = hasattr(model, 'predict') and not (model_type in ['OLS', 'Logit'])
+        self.is_sklearn = hasattr(model, 'predict')
         self.is_classification = model_type in ['Random Forest Classifier', 'XGB Classifier', 'Logit']
 
     def predict(self, X_input):
@@ -30,7 +30,7 @@ class Predictor:
                 X_processed = self.scaler.transform(X_processed)
 
         # 2. Add Constant for statsmodels if needed
-        if self.model_type in ['OLS', 'Logit']:
+        if self.model_type in ['OLS', 'Logit', 'Linear (OLS)']:
             X_processed = sm.add_constant(X_processed, has_constant='add')
 
         # 3. Predict

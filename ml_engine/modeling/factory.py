@@ -31,33 +31,48 @@ class XGBClassifierWrapper:
         # Delegate other attributes to the underlying XGBoost model
         return getattr(self.model, name)
 
-class StatsModelWrapper:
-    def __init__(self, model_class, **kwargs):
+class StatsModelsWrapper:
+    """
+    Wrapper for statsmodels OLS/Logit to provide an sklearn-like interface.
+    """
+    def __init__(self, model_class):
         self.model_class = model_class
-        self.kwargs = kwargs
-        self.model = None
-        self.params = None
+        self.results = None
 
     def fit(self, X, y):
-        # Add constant for statsmodels
+        # Statsmodels requires constant to be added if not already present
         X_const = sm.add_constant(X, has_constant='add')
-        self.model = self.model_class(y, X_const, **self.kwargs).fit(disp=0)
+        self.results = self.model_class(y, X_const).fit()
         return self
 
     def predict(self, X):
         X_const = sm.add_constant(X, has_constant='add')
-        return self.model.predict(X_const)
+        return self.results.predict(X_const)
 
 class ModelFactory:
     @staticmethod
     def create_model(model_type, **kwargs):
         """
         Factory method to create ML models.
+        
+        Args:
+            model_type (str): Type of model to create. 
+                              Options: 'Random Forest Regressor', 'Random Forest Classifier', 
+                                       'XGB Regressor', 'XGB Classifier',
+                                       'Linear (OLS)', 'OLS', 'Logit'
+            **kwargs: Hyperparameters for the model.
+        
+        Returns:
+            Model instance.
         """
-        if model_type in ['Random Forest Regressor', 'Random Forest Classifier']:
-            is_reg = 'Regressor' in model_type
-            cls = RandomForestRegressor if is_reg else RandomForestClassifier
-            return cls(
+        if model_type == 'Random Forest Regressor':
+            return RandomForestRegressor(
+                n_estimators=kwargs.get('n_estimators', 100),
+                max_depth=kwargs.get('max_depth', None),
+                random_state=kwargs.get('random_state', 42)
+            )
+        elif model_type == 'Random Forest Classifier':
+            return RandomForestClassifier(
                 n_estimators=kwargs.get('n_estimators', 100),
                 max_depth=kwargs.get('max_depth', None),
                 random_state=kwargs.get('random_state', 42)
@@ -79,9 +94,9 @@ class ModelFactory:
                 enable_categorical=True
             )
         elif model_type in ['OLS', 'Linear (OLS)']:
-            return StatsModelWrapper(sm.OLS)
+            return StatsModelsWrapper(sm.OLS)
         elif model_type == 'Logit':
-            return StatsModelWrapper(sm.Logit)
+            return StatsModelsWrapper(sm.Logit)
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 

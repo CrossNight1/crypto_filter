@@ -210,9 +210,11 @@ class BinanceFuturesFetcher:
 class DataManager:
     """Manages data storage and caching"""
     
-    def __init__(self, data_dir: str = "data_cache"):
+    def __init__(self, data_dir: str = "data_cache", cache_size: int = 50):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
+        self._cache = {}
+        self._cache_size = cache_size
         
     def _get_path(self, symbol: str, interval: str) -> str:
         return os.path.join(self.data_dir, f"{symbol}_{interval}.parquet")
@@ -221,12 +223,75 @@ class DataManager:
         if data.empty: return
         path = self._get_path(symbol, interval)
         data.to_parquet(path, index=False)
+        # Invalidate cache on save
+        self.clear_cache(symbol, interval)
         
     def load_data(self, symbol: str, interval: str) -> Optional[pd.DataFrame]:
+        cache_key = f"{symbol}_{interval}"
         path = self._get_path(symbol, interval)
-        if os.path.exists(path):
-            return pd.read_parquet(path)
-        return None
+        
+        # Check if file exists first
+        if not os.path.exists(path):
+            return None
+            
+        # Check cache
+        if cache_key in self._cache:
+            # Check if file has been modified since cached
+            mtime = os.path.getmtime(path)
+            if self._cache[cache_key]['mtime'] >= mtime:
+                return self._cache[cache_key]['data']
+        
+        # Load from disk
+        try:
+            df = pd.read_parquet(path)
+            # Simple LRU: if full, remove oldest (first inserted in dict)
+            if len(self._cache) >= self._cache_size:
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+                
+            self._cache[cache_key] = {
+                'data': df,
+                'mtime': os.path.getmtime(path)
+            }
+            return df
+        except Exception as e:
+            logger.error(f"Error loading {path}: {e}")
+            return None
+
+    def clear_cache(self, symbol: Optional[str] = None, interval: Optional[str] = None):
+        if symbol and interval:
+            cache_key = f"{symbol}_{interval}"
+            self._cache.pop(cache_key, None)
+        else:
+            self._cache.clear()
+            
+    def delete_data(self, interval: str = "ALL"):
+        """Deletes cached files for a specific interval or all data."""
+        files = os.listdir(self.data_dir)
+        deleted_count = 0
+        for f in files:
+            if not f.endswith(".parquet"):
+                continue
+            
+            should_delete = False
+            if interval == "ALL":
+                should_delete = True
+            else:
+                # format: SYMBOL_INTERVAL.parquet
+                name = f.replace(".parquet", "")
+                parts = name.split('_')
+                if len(parts) >= 2 and parts[-1] == interval:
+                    should_delete = True
+            
+            if should_delete:
+                try:
+                    os.remove(os.path.join(self.data_dir, f))
+                    deleted_count += 1
+                except Exception as e:
+                    logger.error(f"Error deleting {f}: {e}")
+        
+        self.clear_cache()
+        return deleted_count
         
     def get_existing_symbols(self) -> List[str]:
         # Legacy support or simple list
