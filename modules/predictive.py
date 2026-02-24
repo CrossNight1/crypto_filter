@@ -913,6 +913,7 @@ def predictive_server(input, output, session):
                     logger.log("Predictive", "INFO", "Step 4: Training Meta-model")
                     step += 1
                     p.set(step, message="Training Meta-model & Backtest...")
+                    
                     # Get Primary predictions on the Meta fold
                     p_meta_input = model.predict(X_train_meta)
                     p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)

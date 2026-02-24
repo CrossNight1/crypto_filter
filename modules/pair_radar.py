@@ -275,7 +275,7 @@ def pair_radar_server(input, output, session, global_interval):
             margin=dict(l=50, r=50, t=50, b=50)
         )
 
-        fig.update_xaxes(rangeslider_visible=False, type='category')
+        fig.update_xaxes(rangeslider_visible=False)
 
         for i in [1, 2, 3, 4]:
             fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=False, row=i, col=1)
