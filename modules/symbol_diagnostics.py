@@ -3,9 +3,12 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.figure_factory as ff
+import plotly.colors as pc
 from shinywidgets import output_widget, render_widget
 from statsmodels.tsa.arima.model import ARIMA
 from scipy.optimize import minimize
+from scipy.stats import skew, kurtosis
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
@@ -13,6 +16,7 @@ from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS
 from src.logger import logger
 from ml_engine.labeling.labeler import Labeler
 from ml_engine.analysis.correlation import DecompositionEngine
+from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
 
 # --- GARCH HELPER ---
 def garch_neg_log_likelihood(params, returns):
@@ -105,60 +109,108 @@ def symbol_diagnostics_ui():
                 ui.output_ui("data_status"),
             ),
             
-            ui.div(
-                # Hidden marker
-                ui.div(ui.output_text("diag_ready"), class_="d-none"),
-                
-                ui.panel_conditional(
-                    "input.btn_run_diag > 0",
-                    
-                    # 1. Performance Overview
-                    ui.card(
-                        ui.card_header("Performance Overview"),
-                        ui.layout_columns(
-                            ui.value_box("CVaR", ui.output_text("val_cvar"), theme="primary"),
-                            ui.value_box("Volatility", ui.output_text("val_vol"), theme="blue"),
-                            ui.value_box("Omega Ratio", ui.output_text("val_omega"), theme="red"),
-                            ui.value_box("Avg Drawdown", ui.output_text("val_avgdd"), theme="orange"),
-                            ui.value_box("Beta", ui.output_text("val_beta"), theme="info"),
-                            ui.value_box("Alpha", ui.output_text("val_alpha"), theme="success"),
+            ui.navset_card_underline(
+                ui.nav_panel(
+                    "Standard Analysis",
+                    ui.div(
+                        # Hidden marker
+                        ui.div(ui.output_text("diag_ready"), class_="d-none"),
+                        
+                        ui.panel_conditional(
+                            "input.btn_run_diag > 0",
+                            
+                            # 1. Performance Overview
+                            ui.card(
+                                ui.card_header("Performance Overview"),
+                                ui.layout_columns(
+                                    ui.value_box("CVaR", ui.output_text("val_cvar"), theme="primary"),
+                                    ui.value_box("Volatility", ui.output_text("val_vol"), theme="blue"),
+                                    ui.value_box("Omega Ratio", ui.output_text("val_omega"), theme="red"),
+                                    ui.value_box("Avg Drawdown", ui.output_text("val_avgdd"), theme="orange"),
+                                    ui.value_box("Beta", ui.output_text("val_beta"), theme="info"),
+                                    ui.value_box("Alpha", ui.output_text("val_alpha"), theme="success"),
+                                )
+                            ),
+                            
+                            # 2. Metrics & Factors
+                            ui.card(
+                                ui.card_header("Metrics & Factor Decomposition"),
+                                ui.layout_columns(
+                                    ui.div(
+                                        output_widget("plot_metrics")
+                                    ),
+                                    ui.div(
+                                        output_widget("plot_factors")
+                                    ),
+                                    col_widths=[6, 6]
+                                )
+                            ),
+                            
+                            # 3. Forecast
+                            ui.card(
+                                ui.card_header("Forecast (Forward 10 periods)"),
+                                ui.layout_columns(
+                                    ui.div(
+                                        output_widget("plot_forecast_price")
+                                    ),
+                                    ui.div(
+                                        output_widget("plot_forecast_vol")
+                                    ),
+                                    col_widths=[6, 6]
+                                )
+                            ),
+                            
+                            # 4. Cointegration
+                            ui.card(
+                                ui.card_header("Cointegration & Correlation"),
+                                output_widget("plot_coint")
+                            )
                         )
-                    ),
-                    
-                    # 2. Metrics & Factors
-                    ui.card(
-                        ui.card_header("Metrics & Factor Decomposition"),
-                        ui.layout_columns(
-                            ui.div(
-                                output_widget("plot_metrics")
-                            ),
-                            ui.div(
-                                output_widget("plot_factors")
-                            ),
-                            col_widths=[6, 6]
-                        )
-                    ),
-                    
-                    # 3. Forecast
-                    ui.card(
-                        ui.card_header("Forecast (Forward 10 periods)"),
-                        ui.layout_columns(
-                            ui.div(
-                                output_widget("plot_forecast_price")
-                            ),
-                            ui.div(
-                                output_widget("plot_forecast_vol")
-                            ),
-                            col_widths=[6, 6]
-                        )
-                    ),
-                    
-                    # 4. Cointegration
-                    ui.card(
-                        ui.card_header("Cointegration & Correlation"),
-                        output_widget("plot_coint")
                     )
-                )
+                ),
+                ui.nav_panel(
+                    "Financial Bars",
+                    ui.div(
+                        ui.row(
+                            ui.column(
+                                4,
+                                ui.card(
+                                    ui.card_header("Structural Engineering"),
+                                    ui.input_select("diag_bar_type", "Active Bar Type", choices=["Time Bars", "Volume Bars", "Dollar Bars"], selected="Dollar Bars"),
+                                    ui.layout_columns(
+                                        ui.input_numeric("diag_vol_th", "Volume Threshold", value=10000, min=1),
+                                        ui.input_numeric("diag_dollar_th", "Dollar Threshold", value=1000000, min=1),
+                                    ),
+                                    ui.layout_columns(
+                                        ui.input_action_button("btn_generate_bars", "Generate All", class_="btn-primary w-100"),
+                                        ui.input_action_button("btn_diag_auto_calibrate", "Auto Calibrate", class_="btn-primary w-100"),
+                                    ),
+                                    ui.hr(),
+                                    ui.output_table("diag_engineering_stats_table")
+                                )
+                            ),
+                            ui.column(
+                                8,
+                                ui.card(
+                                    ui.card_header("Return Distribution Comparison"),
+                                    output_widget("diag_engineering_dist_plot"),
+                                    full_screen=True
+                                )
+                            )
+                        ),
+                        ui.row(
+                            ui.column(
+                                12,
+                                ui.card(
+                                    ui.card_header("Bar OHLCV Viewer"),
+                                    output_widget("plot_financial_bars"),
+                                    full_screen=True
+                                )
+                            )
+                        )
+                    )
+                ),
+                id="tab_diag"
             )
         )
     )
@@ -167,6 +219,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
     engine = MetricsEngine()
     
     diag_data = reactive.Value({})
+    engineering_results_cache = reactive.Value(None)
+
     data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"},
                                 "symbol": {"oldest": "-", "latest": "-"}})
     
@@ -291,7 +345,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             # 4. Exposure (Beta)
             beta, alpha, r2 = 0, 0, 0
             if bench_rets is not None:
-                beta, alpha, r2 = engine.calculate_beta_alpha(log_rets_aligned, bench_rets_aligned)
+                beta_, alpha_, r2 = engine.calculate_beta_alpha(log_rets_aligned, bench_rets_aligned)
                 
             # Factor Decomp - Load ALL symbols for comprehensive analysis
             all_syms = list(manager.get_inventory().keys())
@@ -315,7 +369,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             # ARIMA for Price
             try:
                 history_price = prices[-window:]
-                model = ARIMA(history_price, order=(1,1,1))
+                model = ARIMA(history_price, order=(5,1,5))
                 model_fit = model.fit()
                 fc_res = model_fit.get_forecast(steps=10)
                 fc_mean = fc_res.predicted_mean
@@ -388,7 +442,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
 
             col_droped = ["volatility"]
             latest_metrics = latest_metrics.drop(columns=col_droped)
-            latest_metrics = latest_metrics.dropna()
+            latest_metrics = latest_metrics.dropna(axis=1).dropna(axis=0)
             
             from scipy.stats import zscore
             for col in latest_metrics.columns:
@@ -404,8 +458,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 "volatility": volatility,
                 "omega": omega_ratio,
                 "metrics_df": latest_metrics.tail(1).T.reset_index(),
-                "beta": beta,
-                "alpha": alpha,
+                "beta": beta_,
+                "alpha": alpha_,
                 "factor_loadings": pd.DataFrame({"Factor": factor_corrs.index, "Correlation": factor_corrs.values}) if not factor_corrs.empty else pd.DataFrame(),
                 "fc_price": {"hist": history_price, "fc": fc_mean, "ci": fc_ci},
                 "fc_vol": {"hist": hist_vol, "fc": vol_forecast_vals},
@@ -466,9 +520,11 @@ def symbol_diagnostics_server(input, output, session, global_interval):
     @render_widget
     def plot_metrics():
         d = diag_data.get()
-        if not d or d['metrics_df'].empty: return go.Figure()
+        if not d or d['metrics_df'].empty: return None
         
         df = d['metrics_df']
+        if len(df.columns) < 2: return None
+
         df.columns = ["Metric", "Value"]
         # Filter numeric only
         df = df[pd.to_numeric(df['Value'], errors='coerce').notnull()].head(10)
@@ -545,7 +601,6 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         ))
         
         fig.update_layout(
-            title="Price Forecast (ARIMA)",
             template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=735)
         return apply_theme(fig)
 
@@ -589,7 +644,6 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             ))
 
         fig.update_layout(
-            title="Volatility Forecast (GARCH)",
             template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=735)
         return apply_theme(fig)
 
@@ -640,3 +694,201 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         )
         
         return apply_theme(fig)
+
+    @reactive.calc
+    @reactive.event(input.btn_generate_bars)
+    def engineering_result():
+        symbol = input.diag_symbol()
+        interval = input.diag_interval()
+        
+        if not symbol:
+            return None
+
+        with ui.Progress(min=0, max=100) as p:
+            p.set(10, message="Loading Data...")
+            df = manager.load_data(symbol, interval)
+            if df is None or df.empty: return None
+            
+            if 'open_time' in df.columns:
+                df = df.set_index(pd.to_datetime(df['open_time']))
+            
+            p.set(30, message="Generating Time Bars...")
+            time_df = df.copy()
+            time_df['ret'] = np.log(time_df['close'] / time_df['close'].shift(1))
+            
+            p.set(50, message="Generating Volume Bars...")
+            vol_df = construct_volume_bars(df, input.diag_vol_th())
+            if not vol_df.empty:
+                vol_df['ret'] = np.log(vol_df['close'] / vol_df['close'].shift(1))
+                
+            p.set(70, message="Generating Dollar Bars...")
+            dollar_df = construct_dollar_bars(df, input.diag_dollar_th())
+            if not dollar_df.empty:
+                dollar_df['ret'] = np.log(dollar_df['close'] / dollar_df['close'].shift(1))
+            
+            p.set(100, message="Complete")
+            
+            res = {
+                "time": time_df,
+                "volume": vol_df,
+                "dollar": dollar_df,
+                "ticker": symbol
+            }
+            engineering_results_cache.set(res)
+            return res
+
+    @render_widget
+    def diag_engineering_dist_plot():
+        res = engineering_result()
+        if res is None: return None
+
+        datasets = []
+        labels = []
+        
+        for k in ["time", "volume", "dollar"]:
+            df = res.get(k)
+            if df is not None and not df.empty and 'ret' in df.columns:
+                rets = df['ret'].dropna()
+                if len(rets) > 10:
+                    datasets.append(rets.values)
+                    labels.append(k.capitalize() + " Bars")
+                    
+        if not datasets: return None
+
+        colors = pc.diverging.Spectral_r[:len(datasets)]
+
+        fig = ff.create_distplot(
+            datasets,
+            labels,
+            bin_size=.001,
+            show_hist=True,
+            show_curve=True,
+            colors=colors
+        )
+
+        fig.update_layout(
+            template="plotly_dark",
+            height=460,
+            width=1000,
+            margin=dict(t=40, b=60, l=30, r=30),
+            legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+            xaxis_title="Log Returns",
+            yaxis_title="Density"
+        )
+        return apply_theme(fig)
+
+    @render.table
+    def diag_engineering_stats_table():
+        res = engineering_result()
+        if res is None: return None
+        
+        stats_list = []
+        for k in ["time", "volume", "dollar"]:
+            df = res.get(k)
+            if df is not None and not df.empty:
+                rets = df['ret'].dropna()
+                stats_list.append({
+                    "Bar Type": k.capitalize(),
+                    "Count": len(df),
+                    "Skew": skew(rets),
+                    "Kurtosis": kurtosis(rets, fisher=True)
+                })
+        
+        df_stats = pd.DataFrame(stats_list)
+        return (
+            df_stats.style
+            .hide_index()
+            .format({"Skew": "{:.4f}", "Kurtosis": "{:.4f}"})
+            .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
+            .set_table_styles([
+                {"selector": "th", "props": [("color", "black"), ("background-color", "#FCC780"), ("font-weight", "bold")]},
+                {"selector": "td", "props": [("border", "1px solid #1a4da3")]}
+            ])
+        )
+
+    @reactive.Effect
+    @reactive.event(input.btn_diag_auto_calibrate)
+    async def _auto_calibrate_diag():
+        symbol = input.diag_symbol()
+        interval = input.diag_interval()
+        
+        if not symbol:
+            ui.notification_show("Please select a symbol", type="warning")
+            return
+
+        with ui.Progress(min=0, max=100) as p:
+            p.set(20, message="Loading Data...")
+            df = manager.load_data(symbol, interval)
+            if df is None or df.empty:
+                ui.notification_show("No data available", type="error")
+                return
+            
+            if 'open_time' in df.columns:
+                df = df.set_index(pd.to_datetime(df['open_time']))
+
+            p.set(40, message="Calibrating Volume...")
+            opt_vol = calibrate_bar_threshold(df, "Volume Bars")
+            if opt_vol:
+                ui.update_numeric("diag_vol_th", value=int(opt_vol))
+                
+            p.set(70, message="Calibrating Dollar...")
+            opt_dollar = calibrate_bar_threshold(df, "Dollar Bars")
+            if opt_dollar:
+                ui.update_numeric("diag_dollar_th", value=int(opt_dollar))
+            
+            p.set(100, message="Complete")
+            ui.notification_show(f"✓ Calibrated! Vol: {opt_vol:,}, Dollar: {opt_dollar:,}", type="message")
+
+    @render_widget
+    def plot_financial_bars():
+        res = engineering_results_cache.get()
+        if res is None: return None
+        
+        b_type = input.diag_bar_type()
+        target = "time" if b_type == "Time Bars" else ("volume" if b_type == "Volume Bars" else "dollar")
+        df = res.get(target)
+        
+        if df is None or df.empty: return None
+
+        df.index = pd.to_datetime(df.index)
+        df.index = df.index.strftime("%Y-%m-%d %H:%M")
+        
+        fig = go.Figure(data=[go.Candlestick(
+            x=df.index,
+            open=df['open'],
+            high=df['high'],
+            low=df['low'],
+            close=df['close'],
+            name="OHLC",
+            increasing_line_color="lightgray",
+            decreasing_line_color="#ff4b4b"
+        )])
+        
+        fig.update_layout(
+            showlegend=False,
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.12,
+                xanchor="center",
+                x=0.5
+            ),
+            template="plotly_dark",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            height=600,
+            width=1500,
+            margin=dict(l=50, r=50, t=50, b=50)
+        )
+
+        fig.update_xaxes(rangeslider_visible=False, type='category')
+        fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=False)
+        fig.update_yaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=True,
+                        zerolinecolor="rgba(255,255,255,0.2)")
+
+        fig = apply_theme(fig)
+        fig.update_layout(
+            margin=dict(l=50, r=100, t=50, b=50)
+        )
+        return fig

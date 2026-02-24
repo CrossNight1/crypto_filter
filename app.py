@@ -74,9 +74,9 @@ app_ui = ui.page_navbar(
                         ui.input_action_button("go_multivariate", "multivariate_analysis", class_="btn-primary w-100")
                     ),
                     ui.card(
-                        ui.card_header("Machine Learning"),
+                        ui.card_header("Predictive"),
                         ui.p("ML forecasting with meta-labeling verification protocols."),
-                        ui.input_action_button("go_machine_learning", "explore_models", class_="btn-primary w-100")
+                        ui.input_action_button("go_predictive", "explore_models", class_="btn-primary w-100")
                     ),
                     ui.card(
                         ui.card_header("Pair Radar"),
@@ -96,7 +96,7 @@ app_ui = ui.page_navbar(
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
     ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
-    ui.nav_panel("MACHINE_LEARNING", predictive_ui()),
+    ui.nav_panel("PREDICTIVE", predictive_ui()),
     ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
     ui.nav_spacer(),
@@ -149,9 +149,9 @@ def server(input, output, session):
         """)
     
     @reactive.Effect
-    @reactive.event(input.go_machine_learning)
-    def _go_ml():
-        ui.update_navset("main_nav", selected="MACHINE_LEARNING")
+    @reactive.event(input.go_predictive)
+    def _go_predictive():
+        ui.update_navset("main_nav", selected="PREDICTIVE")
 
     @reactive.Effect
     @reactive.event(input.go_radar)

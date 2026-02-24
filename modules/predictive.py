@@ -31,6 +31,7 @@ from ml_engine.predictive.predictor import Predictor
 from ml_engine.labeling.labeler import Labeler, TripleBarrierLabeler, StationarityLabeler, CombinedLabeler, TailSetLabeler
 from src.logger import logger
 from src.backtest import BacktestEngine
+from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
 
 def predictive_ui():
     return ui.layout_sidebar(
@@ -305,123 +306,6 @@ def predictive_server(input, output, session):
     labeled_data = reactive.Value({})  # Cache for labeled data: {ticker_interval_labeler: {"df": df, "y": y_series, "params": {...}}}
     filtered_features = reactive.Value(None) # Cache for feature filtering results from Data Engineering
 
-    @njit
-    def _volume_bar_core(open_, high_, low_, close_, volume_, threshold):
-        n = len(close_)
-        
-        o_list = []
-        h_list = []
-        l_list = []
-        c_list = []
-        v_list = []
-        t_list = []
-        
-        cum_vol = 0.0
-        o = h = l = c = 0.0
-        start_idx = 0
-        
-        for i in range(n):
-            if cum_vol == 0.0:
-                o = open_[i]
-                h = high_[i]
-                l = low_[i]
-                start_idx = i
-            
-            cum_vol += volume_[i]
-            if high_[i] > h: h = high_[i]
-            if low_[i] < l: l = low_[i]
-            c = close_[i]
-            
-            if cum_vol >= threshold:
-                o_list.append(o)
-                h_list.append(h)
-                l_list.append(l)
-                c_list.append(c)
-                v_list.append(cum_vol)
-                t_list.append(start_idx)
-                cum_vol = 0.0
-        
-        return t_list, o_list, h_list, l_list, c_list, v_list
-
-
-    @njit
-    def _dollar_bar_core(open_, high_, low_, close_, volume_, threshold):
-        n = len(close_)
-        
-        o_list = []
-        h_list = []
-        l_list = []
-        c_list = []
-        d_list = []
-        v_list = []
-        t_list = []
-        
-        cum_dollar = 0.0
-        cum_vol = 0.0
-        o = h = l = c = 0.0
-        start_idx = 0
-        
-        for i in range(n):
-            if cum_dollar == 0.0:
-                o = open_[i]
-                h = high_[i]
-                l = low_[i]
-                start_idx = i
-            
-            dollar_val = close_[i] * volume_[i]
-            cum_dollar += dollar_val
-            cum_vol += volume_[i]
-            
-            if high_[i] > h: h = high_[i]
-            if low_[i] < l: l = low_[i]
-            c = close_[i]
-            
-            if cum_dollar >= threshold:
-                o_list.append(o)
-                h_list.append(h)
-                l_list.append(l)
-                c_list.append(c)
-                d_list.append(cum_dollar)
-                v_list.append(cum_vol)
-                t_list.append(start_idx)
-                cum_dollar = 0.0
-                cum_vol = 0.0
-        
-        return t_list, o_list, h_list, l_list, c_list, d_list, v_list
-
-
-    def construct_volume_bars(df, threshold):
-        open_ = df["open"].values.astype(np.float64)
-        high_ = df["high"].values.astype(np.float64)
-        low_ = df["low"].values.astype(np.float64)
-        close_ = df["close"].values.astype(np.float64)
-        volume_ = df["volume"].values.astype(np.float64)
-        
-        t, o, h, l, c, v = _volume_bar_core(open_, high_, low_, close_, volume_, threshold)
-        
-        if len(o) == 0:
-            return pd.DataFrame()
-        
-        idx = df.index[np.array(t)]
-        out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}, index=idx)
-        return out
-
-
-    def construct_dollar_bars(df, threshold):
-        open_ = df["open"].values.astype(np.float64)
-        high_ = df["high"].values.astype(np.float64)
-        low_ = df["low"].values.astype(np.float64)
-        close_ = df["close"].values.astype(np.float64)
-        volume_ = df["volume"].values.astype(np.float64)
-        
-        t, o, h, l, c, d, v = _dollar_bar_core(open_, high_, low_, close_, volume_, threshold)
-        
-        if len(o) == 0:
-            return pd.DataFrame()
-        
-        idx = df.index[np.array(t)]
-        out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v, "dollar_vol": d}, index=idx)
-        return out
 
 
     @reactive.Effect
@@ -469,18 +353,14 @@ def predictive_server(input, output, session):
         """Auto-calibrate Volume and Dollar thresholds to minimize normality loss"""
         # Get current ticker and interval
         goal = input.analysis_goal()
-        if goal == "Directional":
-            ticker = input.selected_ticker()
-        else:
-            ts = list(input.selected_tickers())
-            if not ts:
-                ui.notification_show("Please select a ticker first.", type="warning")
-                return
-            ticker = ts[0]
+        ticker = input.selected_ticker() if goal == "Directional" else (list(input.selected_tickers())[0] if input.selected_tickers() else None)
+        
+        if not ticker:
+            ui.notification_show("Please select a ticker first.", type="warning")
+            return
         
         interval = input.interval()
         df = manager.load_data(ticker, interval)
-        
         if df is None or df.empty:
             ui.notification_show(f"No data available for {ticker}.", type="error")
             return
@@ -489,99 +369,18 @@ def predictive_server(input, output, session):
             df = df.set_index(pd.to_datetime(df['open_time']))
         
         ui.notification_show(f"Calibrating thresholds for {ticker}", duration=5)
-                
-        def calibration_loss(returns, N_min=10000):
-            if len(returns) < 30:
-                return 1e10
 
-            N = len(returns)
-            s = skew(returns)
-            k = kurtosis(returns) - 3
-
-            return (
-                s**2 +
-                1000 * max(0, (N_min - N)/N_min)**2
-            )
+        # Use shared utility
+        optimal_vol = calibrate_bar_threshold(df, "Volume Bars")
+        optimal_dollar = calibrate_bar_threshold(df, "Dollar Bars")
         
-        def objective_volume(vol_threshold):
-            """Objective function for volume bars"""
-            try:
-                vol_df = construct_volume_bars(df, int(vol_threshold[0]))
-                if vol_df.empty or len(vol_df) < 10:
-                    return 1e10
-                returns = np.log(vol_df['close'] / vol_df['close'].shift(1)).dropna()
-                loss = calibration_loss(returns)
-                return loss
-            except Exception as e:
-                return 1e10
-        
-        def objective_dollar(dollar_threshold):
-            """Objective function for dollar bars"""
-            try:
-                dollar_df = construct_dollar_bars(df, int(dollar_threshold[0]))
-                if dollar_df.empty or len(dollar_df) < 10:
-                    return 1e10
-                returns = np.log(dollar_df['close'] / dollar_df['close'].shift(1)).dropna()
-                loss = calibration_loss(returns)
-                return loss
-            except Exception as e:
-                return 1e10
-
-        def objective_volume_log(x):
-            th = int(10**x[0])
-            return objective_volume([th])
-
-        def objective_dollar_log(x):
-            th = int(10**x[0])
-            return objective_dollar([th])
-        
-        # Optimize Volume threshold with multiple starting points
-        logger.log("Predictive", "INFO", "Optimizing Volume threshold...")
-        print(f"\n=== Optimizing Volume Threshold for {ticker} ===")
-        
-        best_vol_result = None
-        best_vol_loss = 1e10
-        
-        for x0 in [1000, 5000, 10000, 50000]:
-            result = minimize(
-                objective_volume_log,
-                x0=[np.log10(x0)],
-                bounds=[(np.log10(100), np.log10(1000000000))],
-                method='Nelder-Mead',
-                options={'maxiter': 200, 'xatol':1e-3, 'fatol':1e-3}
-            )
-            if result.fun < best_vol_loss:
-                best_vol_loss = result.fun
-                best_vol_result = result
-        
-        optimal_vol = int(10**best_vol_result.x[0])
-        
-        # Optimize Dollar threshold with multiple starting points
-        logger.log("Predictive", "INFO", "Optimizing Dollar threshold...")        
-        best_dollar_result = None
-        best_dollar_loss = 1e10
-        
-        for x0 in [100000000, 500000000, 1000000000, 5000000000]:
-            result = minimize(
-                objective_dollar_log,
-                x0=[np.log10(x0)],
-                bounds=[(np.log10(1000), np.log10(100000000000))],
-                method='Nelder-Mead',
-                options={'maxiter': 200, 'xatol':1e-3, 'fatol':1e-3}
-            )
-            if result.fun < best_dollar_loss:
-                best_dollar_loss = result.fun
-                best_dollar_result = result
-
-        optimal_dollar = int(10**best_dollar_result.x[0])
-        
-        # Update sync values for immediate reactive update
-        vol_th_sync.set(optimal_vol)
-        dollar_th_sync.set(optimal_dollar)
-        
-        # Update UI inputs
-        ui.update_numeric("vol_bar_th", value=optimal_vol)
-        ui.update_numeric("dollar_bar_th", value=optimal_dollar)
+        if optimal_vol:
+            vol_th_sync.set(optimal_vol)
+            ui.update_numeric("vol_bar_th", value=optimal_vol)
+            
+        if optimal_dollar:
+            dollar_th_sync.set(optimal_dollar)
+            ui.update_numeric("dollar_bar_th", value=optimal_dollar)
         
         ui.notification_show(
             f"✓ Calibration complete! Volume: {optimal_vol:,}, Dollar: {optimal_dollar:,}",

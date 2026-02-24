@@ -39,7 +39,7 @@ def pair_radar_ui():
             ui.input_select("pair_mode", "Generation Mode", 
                            choices={"ratio": "Ratio", "spread": "Spread"}),
             ui.input_numeric("rolling_window", "Rolling Window", value=30, min=5),
-            ui.input_numeric("window", "Window", value=500, min=5),
+            ui.input_numeric("window", "Window", value=700, min=5),
             ui.input_action_button("btn_gen_pair", "Generate Radar", class_="btn-primary w-100 mt-3"),
         ),
         ui.div(
@@ -123,18 +123,21 @@ def pair_radar_server(input, output, session, global_interval):
             
             if mode == "ratio":
                 synthetic["open"] = df_a["open"] / (beta * df_b["open"])
-                synthetic["high"] = df_a["high"] / (beta * df_b["low"])
-                synthetic["low"] = df_a["low"] / (beta * df_b["high"])
+                synthetic["high"] = df_a["high"] / (beta * df_b["high"])
+                synthetic["low"] = df_a["low"] / (beta * df_b["low"])
                 synthetic["close"] = df_a["close"] / (beta * df_b["close"])
 
             else: # spread
                 synthetic["open"] = df_a["open"] - beta * df_b["open"]
-                synthetic["high"] = df_a["high"] - beta * df_b["low"]
-                synthetic["low"] = df_a["low"] - beta * df_b["high"]
+                synthetic["high"] = df_a["high"] - beta * df_b["high"]
+                synthetic["low"] = df_a["low"] - beta * df_b["low"]
                 synthetic["close"] = df_a["close"] - beta * df_b["close"]
                 
             # Rolling stats
             synthetic["zscore"] = calculate_rolling_zscore(synthetic["close"], window)
+            synthetic["corr_pearson_price"] = df_a["close"].rolling(window).corr(df_b["close"])
+            synthetic["corr_kendall_price"] = df_a["close"].rolling(window).apply(lambda x: x.corr(df_b["close"].loc[x.index], method='kendall') if len(x) == window else np.nan)
+
             synthetic["corr_pearson"] = df_a["close"].diff().dropna().rolling(window).corr(df_b["close"].diff().dropna())
             synthetic["corr_kendall"] = df_a["close"].diff().dropna().rolling(window).apply(lambda x: x.corr(df_b["close"].diff().dropna().loc[x.index], method='kendall') if len(x) == window else np.nan)
             
@@ -191,53 +194,75 @@ def pair_radar_server(input, output, session, global_interval):
         if df.empty:
             return None
         
+        df.index = pd.to_datetime(df.index)
         df.index = df.index.strftime("%Y-%m-%d %H:%M")
-        df = df.tail(input.window())    
-        # Expanded View: 3-row layout
+        df = df.tail(input.window())
+
         fig = make_subplots(
-            rows=3, cols=1, 
+            rows=4, cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.07, 
-            row_heights=[0.6, 0.2, 0.2],
-            # subplot_titles=("Synthetic OHLC", "Rolling Z-score", "Rolling Correlation")
+            vertical_spacing=0.01,
+            row_heights=[0.5, 0.15, 0.15, 0.15]
         )
-        
-        # Row 1: OHLC
+
         fig.add_trace(go.Candlestick(
             x=df.index,
-            open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+            open=df['open'],
+            high=df['high'],
+            low=df['low'],
+            close=df['close'],
             name="Pair Price",
             increasing_line_color="lightgray",
             decreasing_line_color="#ff4b4b"
         ), row=1, col=1)
-        
-        # Row 2: Z-score
+
         z = _sanitize(df['zscore'])
         fig.add_trace(go.Scatter(
-            x=df.index, y=z, name="Z-score",
+            x=df.index,
+            y=z,
+            name="Z-score",
             line=dict(color="#00ffff", width=1.5),
-            fill='tozeroy', fillcolor="rgba(0,255,255,0.1)"
+            fill='tozeroy',
+            fillcolor="rgba(0,255,255,0.1)"
         ), row=2, col=1)
-        
-        for level in [2.0, -2.0]:
-            fig.add_hline(y=level, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
 
-        # Row 3: Correlation
+        fig.add_hline(y=2.0, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
+        fig.add_hline(y=-2.0, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
+
         fig.add_trace(go.Scatter(
-            x=df.index, y=_sanitize(df['corr_pearson']), 
-            name="Pearson Correlation", line=dict(color="#FFD700", width=1.5)
+            x=df.index,
+            y=_sanitize(df['corr_pearson']),
+            name="Pearson (Return)",
+            line=dict(color="#FFD700", width=1.5)
         ), row=3, col=1)
+
         fig.add_trace(go.Scatter(
-            x=df.index, y=_sanitize(df['corr_kendall']), 
-            name="Kendall Correlation", line=dict(color="#00FA9A", width=1.5)
+            x=df.index,
+            y=_sanitize(df['corr_kendall']),
+            name="Kendall (Return)",
+            line=dict(color="#00FA9A", width=1.5)
         ), row=3, col=1)
-        
+
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=_sanitize(df['corr_pearson_price']),
+            name="Pearson (Price)",
+            line=dict(color="#FFA500", width=1.5)
+        ), row=4, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=_sanitize(df['corr_kendall_price']),
+            name="Kendall (Price)",
+            line=dict(color="#FF69B4", width=1.5)
+        ), row=4, col=1)
+
         fig.update_layout(
             showlegend=True,
             legend=dict(
                 orientation="h",
                 yanchor="top",
-                y=-0.15,
+                y=-0.12,
                 xanchor="center",
                 x=0.5
             ),
@@ -249,14 +274,14 @@ def pair_radar_server(input, output, session, global_interval):
             width=1500,
             margin=dict(l=50, r=50, t=50, b=50)
         )
-        
-        # Explicitly disable rangeslider on the first x-axis and ensure subplots are visible
-        fig.update_xaxes(rangeslider_visible=False)
-        
-        for i in [1, 2, 3]:
-            fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.15)", zeroline=False, row=i, col=1)
-            fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.15)", zeroline=True, zerolinecolor="rgba(255,255,255,0.2)", row=i, col=1)
-            
+
+        fig.update_xaxes(rangeslider_visible=False, type='category')
+
+        for i in [1, 2, 3, 4]:
+            fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=False, row=i, col=1)
+            fig.update_yaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=True,
+                            zerolinecolor="rgba(255,255,255,0.2)", row=i, col=1)
+
         return fig
 
     @render.ui
