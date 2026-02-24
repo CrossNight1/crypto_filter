@@ -913,15 +913,28 @@ def predictive_server(input, output, session):
                     logger.log("Predictive", "INFO", "Step 4: Training Meta-model")
                     step += 1
                     p.set(step, message="Training Meta-model & Backtest...")
-                    
+
                     # Get Primary predictions on the Meta fold
-                    p_meta_input = model.predict(X_train_meta)
+                    p_meta_input = model.predict(X_train_meta)                        
                     p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
+
+                    if is_classification:
+                        # Get class probabilities
+                        p_meta_proba = model.predict_proba(X_train_meta)  # shape = (n_samples, n_classes)
+                        # Map predicted class to probability
+                        pred_index = [list(model.classes_).index(c) for c in p_meta_input]
+                        pred_conf = p_meta_proba[np.arange(len(p_meta_input)), pred_index]
+                        
+                        # Keep signal only if probability > 0.5, else 0 (no trade)
+                        p_meta_signals = pd.Series([
+                            sig if conf > 0.6 else 0
+                            for sig, conf in zip(p_meta_input, pred_conf)
+                        ], index=X_train_meta.index)
+
                     if not is_classification:
                         p_meta_signals = np.sign(p_meta_signals)
                                     
                     if len(tickers) == 1:
-                        logger.log("Predictive", "INFO", "Single symbol detected, using BacktestEngine for meta-labels")
                         ticker = tickers[0]
                         full_df = manager.load_data(ticker, interval)
                         if 'open_time' in full_df.columns:
@@ -931,13 +944,12 @@ def predictive_server(input, output, session):
                         meta_df = full_df.reindex(X_train_meta.index)
                         
                         # Naive meta-labels
-                        y_meta = (p_meta_signals * y_ret_meta > 0).astype(int)
+                        y_meta = (p_meta_signals == y_train_meta).astype(int)
                     else:
-                        logger.log("Predictive", "INFO", "Multiple symbols: using naive meta-labels (sign match)")
                         if is_classification:
-                            y_meta = (p_meta_input == y_train_meta).astype(int)
+                            y_meta = (p_meta_signals == y_train_meta).astype(int)
                         else:
-                            y_meta = (np.sign(p_meta_input) * np.sign(y_ret_meta) > 0.0000).astype(int)
+                            y_meta = (np.sign(p_meta_signals) * np.sign(y_ret_meta) > 0.0000).astype(int)
 
                     # Meta features = original features + primary prediction
                     meta_features = pd.concat([X_train_meta, pd.Series(p_meta_input, index=X_train_meta.index, name='primary_pred')], axis=1)

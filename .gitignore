@@ -6,5 +6,4 @@
 
 # Ignore specific directories
 data_cache/
-__pycache__/
 
