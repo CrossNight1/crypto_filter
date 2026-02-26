@@ -9,12 +9,21 @@ import os
 import time
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Union
+from typing import List, Optional, Union, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Setup logging
+# Import from config
+from src.logger import logger
+from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET
+
+# Setup logging (if not already configured by src.logger)
+# If src.logger handles all logging setup, these lines might be redundant.
+# Assuming for now that src.logger provides the 'logger' object and basicConfig is still desired here.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# The line below would overwrite the imported logger if src.logger already provides one.
+# Keeping it as per user's instruction, but noting potential redundancy.
+# logger = logging.getLogger(__name__)
+
 
 class BinanceFuturesFetcher:
     """Fetches data from Binance Perpetual Futures (USDT-M)"""
@@ -226,6 +235,38 @@ class DataManager:
         # Invalidate cache on save
         self.clear_cache(symbol, interval)
         
+    def append_data(self, symbol: str, interval: str, new_data: pd.DataFrame):
+        """Merges new data with existing cache, removes duplicates and saves."""
+        if new_data.empty: return
+        
+        path = self._get_path(symbol, interval)
+        if not os.path.exists(path):
+            self.save_data(new_data, symbol, interval)
+            return
+            
+        existing = pd.read_parquet(path)
+            
+        # Merge and deduplicate
+        combined = pd.concat([existing, new_data])
+        combined = combined.drop_duplicates(subset=['open_time'])
+        combined = combined.sort_values('open_time').reset_index(drop=True)
+        
+        self.save_data(combined, symbol, interval)
+
+    def get_cache_range(self, symbol: str, interval: str) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """Returns (first_ts, last_ts) from the cached file without loading the full set."""
+        path = self._get_path(symbol, interval)
+        if not os.path.exists(path):
+            return None, None
+        try:
+            # Efficiently read just the open_time column
+            df = pd.read_parquet(path, columns=['open_time'])
+            if df.empty: return None, None
+            return df['open_time'].min(), df['open_time'].max()
+        except Exception as e:
+            logger.error(f"Error reading cache range for {symbol}_{interval}: {e}")
+            return None, None
+
     def load_data(self, symbol: str, interval: str) -> Optional[pd.DataFrame]:
         cache_key = f"{symbol}_{interval}"
         path = self._get_path(symbol, interval)
@@ -244,6 +285,10 @@ class DataManager:
         # Load from disk
         try:
             df = pd.read_parquet(path)
+            if not df.empty and 'open_time' in df.columns:
+                df['open_time'] = pd.to_datetime(df['open_time']) + timedelta(hours=TIMEZONE_OFFSET)
+                if 'close_time' in df.columns:
+                    df['close_time'] = pd.to_datetime(df['close_time']) + timedelta(hours=TIMEZONE_OFFSET)
             # Simple LRU: if full, remove oldest (first inserted in dict)
             if len(self._cache) >= self._cache_size:
                 oldest_key = next(iter(self._cache))

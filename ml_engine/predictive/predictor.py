@@ -77,3 +77,67 @@ class Predictor:
             
         return result
 
+
+class IsotonicCalibrator:
+    def fit(self, p, y):
+        p = np.asarray(p)
+        y = np.asarray(y)
+
+        order = np.argsort(p)
+        self.p_sorted = p[order]
+        y_sorted = y[order]
+
+        n = len(y_sorted)
+        solution = y_sorted.astype(float)
+        weight = np.ones(n)
+
+        i = 0
+        while i < n - 1:
+            if solution[i] > solution[i + 1]:
+                total_weight = weight[i] + weight[i + 1]
+                avg = (solution[i] * weight[i] + solution[i + 1] * weight[i + 1]) / total_weight
+                solution[i] = avg
+                solution[i + 1] = avg
+                weight[i] = total_weight
+                weight[i + 1] = total_weight
+
+                j = i
+                while j > 0 and solution[j - 1] > solution[j]:
+                    total_weight = weight[j - 1] + weight[j]
+                    avg = (solution[j - 1] * weight[j - 1] + solution[j] * weight[j]) / total_weight
+                    solution[j - 1] = avg
+                    solution[j] = avg
+                    weight[j - 1] = total_weight
+                    weight[j] = total_weight
+                    j -= 1
+            i += 1
+
+        self.solution = solution
+        return self
+
+    def predict(self, p):
+        return np.interp(np.asarray(p), self.p_sorted, self.solution)
+
+class CalibratedModelWrapper:
+    def __init__(self, model, calibrators, class_to_index):
+        self.model = model
+        self.calibrators = calibrators
+        self.classes_ = model.classes_
+        self.class_to_index = class_to_index
+        for attr in ['feature_names_in_', 'feature_importances_', 'coef_']:
+            if hasattr(model, attr):
+                setattr(self, attr, getattr(model, attr))
+            
+    def predict_proba(self, X):
+        proba = self.model.predict_proba(X).copy()
+        for c, cal in self.calibrators.items():
+            ci = self.class_to_index[c]
+            proba[:, ci] = cal.predict(proba[:, ci])
+        
+        row_sums = proba.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        return proba / row_sums
+        
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        return self.classes_[np.argmax(proba, axis=1)]

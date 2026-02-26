@@ -11,6 +11,10 @@ APP_LAYOUT = "wide"
 THEME = "quartz"
 BG_COLOR = "#1a1a1a"
 
+# --- TIMEZONE SETTING ---
+# Global offset from UTC in hours (e.g., 7 for UTC+7, -5 for EST)
+TIMEZONE_OFFSET = 7
+
 # --- SIDEBAR & WELCOME ---
 SIDEBAR_INFO = "Select a module to proceed"
 WELCOME_TITLE = "Crypto Market Radar"

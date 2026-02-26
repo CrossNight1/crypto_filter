@@ -276,6 +276,7 @@ def market_radar_server(input, output, session, global_interval):
                 def process_symbol(sym):
                     try:
                         df = manager.load_data(sym, interval)
+                        df = df.tail(filter_window * 5)
                         if df is not None and not df.empty:
                             return engine.compute_all_metrics(
                                 {sym: df}, 

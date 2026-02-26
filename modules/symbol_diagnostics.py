@@ -797,7 +797,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         df_stats = pd.DataFrame(stats_list)
         return (
             df_stats.style
-            .hide_index()
+            .hide(axis="index")
             .format({"Skew": "{:.4f}", "Kurtosis": "{:.4f}"})
             .set_properties(**{"font-family": "'Space Mono', monospace", "text-align": "center"})
             .set_table_styles([

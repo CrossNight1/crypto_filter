@@ -201,18 +201,60 @@ def data_loader_server(input, output, session):
                 current_logs.append(f"[{now_str}] {sym} {inter}...")
                 logs.set(current_logs[:])
                 try:
+                    first_ts, last_ts = manager.get_cache_range(sym, inter)
+                    
                     if input.fetch_mode() == "Range":
                         end_t = datetime.now()
-                        start_t = end_t - timedelta(days=input.days_back())
-                        df = fetcher.fetch_history(sym, inter, start_time=start_t, end_time=end_t)
-                    else:
-                        df = fetcher.fetch_candles(sym, inter, limit=input.limit())
+                        requested_start = end_t - timedelta(days=input.days_back())
+                        
+                        # Generate UTC naive counterparts for comparison against cache values
+                        end_t_utc = pd.to_datetime(end_t.timestamp(), unit='s')
+                        req_start_utc = pd.to_datetime(requested_start.timestamp(), unit='s')
+                        
+                        dfs_to_fetch = []
+                        
+                        # Case 1: No cache exists -> Full Range
+                        if not first_ts:
+                            df_full = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_t)
+                            if not df_full.empty:
+                                dfs_to_fetch.append(df_full)
+                                mode_info = "Full Range"
+                            else:
+                                mode_info = "No Data"
+                        else:
+                            mode_info = "Incremental"
+                            # Case 2: Forward Gap (Missing new data)
+                            # Binance returns close_time for current bar, so last_ts is previous bar's open_time
+                            # Check if last_ts is more than 1 interval behind (rough check)
+                            if last_ts < end_t_utc - timedelta(minutes=5):
+                                start_ts_ms = int(pd.Timestamp(last_ts).tz_localize('UTC').timestamp() * 1000) + 1
+                                df_fwd = fetcher.fetch_history(sym, inter, start_time=start_ts_ms, end_time=end_t)
+                                if not df_fwd.empty:
+                                    dfs_to_fetch.append(df_fwd)
+                                    mode_info += " (Forward)"
+                            
+                            # Case 3: Backward Gap (Missing earlier data)
+                            if first_ts > req_start_utc + timedelta(minutes=5):
+                                end_ts_ms = int(pd.Timestamp(first_ts).tz_localize('UTC').timestamp() * 1000) - 1
+                                df_bwd = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_ts_ms)
+                                if not df_bwd.empty:
+                                    dfs_to_fetch.append(df_bwd)
+                                    mode_info += " (Backward)"
 
-                    if not df.empty:
-                        manager.save_data(df, sym, inter)
-                        current_logs.append(f"  > Saved {len(df)} candles")
+                        if dfs_to_fetch:
+                            final_df = pd.concat(dfs_to_fetch)
+                            manager.append_data(sym, inter, final_df)
+                            current_logs.append(f"  > {mode_info}: Added {len(final_df)} candles")
+                        else:
+                            current_logs.append(f"  > Up to date")
                     else:
-                        current_logs.append(f"  ! Missing data")
+                        # Limit mode: Always fetch latest N (standard behavior)
+                        df = fetcher.fetch_candles(sym, inter, limit=input.limit())
+                        if not df.empty:
+                            manager.append_data(sym, inter, df)
+                            current_logs.append(f"  > Limit: Synced {len(df)} candles")
+                        else:
+                            current_logs.append(f"  > Up to date / No data")
                 except Exception as e:
                     current_logs.append(f"  ! Error: {str(e)}")
 
