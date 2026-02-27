@@ -191,15 +191,12 @@ def data_loader_server(input, output, session):
         count_done = 0
         current_logs = []
 
-        max_workers = 5  # concurrency threshold
-        semaphore = asyncio.Semaphore(max_workers)
-
-        async def fetch_and_save(sym, inter):
-            nonlocal count_done
-            async with semaphore:
+        for sym in all_syms:
+            for inter in intervals:
                 now_str = datetime.now().strftime('%H:%M:%S')
                 current_logs.append(f"[{now_str}] {sym} {inter}...")
                 logs.set(current_logs[:])
+                
                 try:
                     first_ts, last_ts = manager.get_cache_range(sym, inter)
                     
@@ -223,9 +220,7 @@ def data_loader_server(input, output, session):
                                 mode_info = "No Data"
                         else:
                             mode_info = "Incremental"
-                            # Case 2: Forward Gap (Missing new data)
-                            # Binance returns close_time for current bar, so last_ts is previous bar's open_time
-                            # Check if last_ts is more than 1 interval behind (rough check)
+                            # Case 2: Forward Gap
                             if last_ts < end_t_utc - timedelta(minutes=5):
                                 start_ts_ms = int(pd.Timestamp(last_ts).tz_localize('UTC').timestamp() * 1000) + 1
                                 df_fwd = fetcher.fetch_history(sym, inter, start_time=start_ts_ms, end_time=end_t)
@@ -233,7 +228,7 @@ def data_loader_server(input, output, session):
                                     dfs_to_fetch.append(df_fwd)
                                     mode_info += " (Forward)"
                             
-                            # Case 3: Backward Gap (Missing earlier data)
+                            # Case 3: Backward Gap
                             if first_ts > req_start_utc + timedelta(minutes=5):
                                 end_ts_ms = int(pd.Timestamp(first_ts).tz_localize('UTC').timestamp() * 1000) - 1
                                 df_bwd = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_ts_ms)
@@ -248,7 +243,7 @@ def data_loader_server(input, output, session):
                         else:
                             current_logs.append(f"  > Up to date")
                     else:
-                        # Limit mode: Always fetch latest N (standard behavior)
+                        # Limit mode: Always fetch latest N
                         df = fetcher.fetch_candles(sym, inter, limit=input.limit())
                         if not df.empty:
                             manager.append_data(sym, inter, df)
@@ -261,10 +256,8 @@ def data_loader_server(input, output, session):
                 count_done += 1
                 progress.set(count_done / total)
                 logs.set(current_logs[:])
+                await asyncio.sleep(0.01)  # Yield to event loop for UI updates
                 await reactive.flush()
-
-        tasks = [fetch_and_save(sym, inter) for sym in all_syms for inter in intervals]
-        await asyncio.gather(*tasks)
 
         is_fetching.set(False)
         ui.notification_show("Data Fetch Complete", type="message")

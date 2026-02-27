@@ -25,7 +25,7 @@ matplotlib.use('Agg') # Safe for web apps
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import METRIC_LABELS, ALL_METRICS, BENCHMARK_SYMBOL, DEFAULT_FEATURES
+from src.config import METRIC_LABELS, ALL_METRICS, BENCHMARK_SYMBOL, DEFAULT_FEATURES, AVAILABLE_INTERVALS
 from ml_engine.modeling.factory import ModelFactory
 from ml_engine.modeling.feature_selection import FeatureSelector
 from ml_engine.predictive.predictor import IsotonicCalibrator, CalibratedModelWrapper
@@ -51,7 +51,7 @@ def predictive_ui():
                 selected="Both Sides"
             ),
             ui.output_ui("symbol_selection_ui"),
-            ui.input_select("interval", "Interval", choices=["1h", "4h", "1d"]),
+            ui.input_select("interval", "Interval", choices=AVAILABLE_INTERVALS),
             ui.input_numeric("pred_lookback", "Window", value=10000, min=100, step=100),
             ui.output_ui("model_select_ui"),
             ui.accordion(

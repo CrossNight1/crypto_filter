@@ -397,10 +397,27 @@ def market_radar_server(input, output, session, global_interval):
         focus_sym = input.focus_symbol().strip().upper()
         selected_points = None
         unselected_opacity = 0.2
+        selection_size = 10
 
         if focus_sym and focus_sym in plot_df['symbol'].str.upper().values:
             pos_idx = list(plot_df['symbol'].str.upper()).index(focus_sym)
             selected_points = [pos_idx]
+            
+        if z != "None" and 'z_marker_size' in plot_df.columns:
+            size_max = 20
+            min_visible = 8
+
+            mask = plot_df['symbol'].astype(str).str.strip().str.upper() == focus_sym
+
+            if mask.any():
+                max_val = plot_df['z_marker_size'].max()
+                current_val = plot_df.loc[mask, 'z_marker_size'].iloc[0]
+
+                if max_val > 0:
+                    sizeref = 2 * max_val / (size_max ** 2)
+                    pixel_size = np.sqrt(current_val / sizeref)
+
+                    selection_size = pixel_size if pixel_size >= min_visible else min_visible
 
         fig.update_traces(
             hovertemplate='<b>%{hovertext}</b><br>' +
@@ -411,7 +428,7 @@ def market_radar_server(input, output, session, global_interval):
             selected=dict(
                 marker=dict(
                     color='#FF3B3B',
-                    size=15,
+                    size=selection_size,
                     opacity=1
                 )
             ),

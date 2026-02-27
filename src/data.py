@@ -13,17 +13,10 @@ from typing import List, Optional, Union, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import from config
-from src.logger import logger
 from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET
 
-# Setup logging (if not already configured by src.logger)
-# If src.logger handles all logging setup, these lines might be redundant.
-# Assuming for now that src.logger provides the 'logger' object and basicConfig is still desired here.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# The line below would overwrite the imported logger if src.logger already provides one.
-# Keeping it as per user's instruction, but noting potential redundancy.
-# logger = logging.getLogger(__name__)
-
+logger = logging.getLogger(__name__)
 
 class BinanceFuturesFetcher:
     """Fetches data from Binance Perpetual Futures (USDT-M)"""
@@ -224,6 +217,8 @@ class DataManager:
         os.makedirs(data_dir, exist_ok=True)
         self._cache = {}
         self._cache_size = cache_size
+        self.fetcher = BinanceFuturesFetcher()
+        self._last_sync = {}
         
     def _get_path(self, symbol: str, interval: str) -> str:
         return os.path.join(self.data_dir, f"{symbol}_{interval}.parquet")
@@ -248,7 +243,7 @@ class DataManager:
             
         # Merge and deduplicate
         combined = pd.concat([existing, new_data])
-        combined = combined.drop_duplicates(subset=['open_time'])
+        combined = combined.drop_duplicates(subset=['open_time'], keep='last')
         combined = combined.sort_values('open_time').reset_index(drop=True)
         
         self.save_data(combined, symbol, interval)
@@ -267,10 +262,50 @@ class DataManager:
             logger.error(f"Error reading cache range for {symbol}_{interval}: {e}")
             return None, None
 
-    def load_data(self, symbol: str, interval: str) -> Optional[pd.DataFrame]:
+    def _sync_data(self, symbol: str, interval: str):
+        """Automatically fetch and append missing data up to the current time."""
+        cache_key = f"{symbol}_{interval}"
+        now = time.time()
+        
+        path = self._get_path(symbol, interval)
+        if hasattr(self, '_last_sync') and cache_key in self._last_sync:
+            if os.path.exists(path) and (now - self._last_sync[cache_key] < 60):
+                # Debounced
+                return
+                
+        if not hasattr(self, '_last_sync'):
+            self._last_sync = {}
+
+        try:
+            first_ts, last_ts = self.get_cache_range(symbol, interval)
+            end_t = datetime.now()
+            
+            if not first_ts:
+                # No data: fetch 30 days
+                logger.info(f"Auto-sync: Fetching initial 30 days for {symbol} ({interval})")
+                requested_start = end_t - timedelta(days=30)
+                df = self.fetcher.fetch_history(symbol, interval, start_time=requested_start, end_time=end_t)
+                if not df.empty:
+                    self.save_data(df, symbol, interval)
+                    self._last_sync[cache_key] = now
+            else:
+                # Incremental forward gap (start from last_ts to update the last candle and fetch new ones)
+                start_ts_ms = int(pd.Timestamp(last_ts).tz_localize('UTC').timestamp() * 1000)
+                df_fwd = self.fetcher.fetch_history(symbol, interval, start_time=start_ts_ms, end_time=end_t)
+                if not df_fwd.empty and len(df_fwd) > 1:
+                    logger.info(f"Auto-sync: Fetched {len(df_fwd)} new candles for {symbol} ({interval})")
+                    self.append_data(symbol, interval, df_fwd)
+                    self._last_sync[cache_key] = now
+        except Exception as e:
+            logger.error(f"Error auto-syncing {symbol}_{interval}: {e}")
+
+    def load_data(self, symbol: str, interval: str, auto_sync: bool = True) -> Optional[pd.DataFrame]:
         cache_key = f"{symbol}_{interval}"
         path = self._get_path(symbol, interval)
         
+        if auto_sync:
+            self._sync_data(symbol, interval)
+            
         # Check if file exists first
         if not os.path.exists(path):
             return None

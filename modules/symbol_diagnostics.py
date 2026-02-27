@@ -214,6 +214,7 @@ def symbol_diagnostics_ui():
             )
         )
     )
+    
 def symbol_diagnostics_server(input, output, session, global_interval):
     manager = DataManager()
     engine = MetricsEngine()

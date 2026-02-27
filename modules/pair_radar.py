@@ -10,7 +10,7 @@ from src.metrics import MetricsEngine
 from statsmodels.tsa.stattools import coint, adfuller
 from scipy import stats
 from scipy.stats import gaussian_kde, rankdata
-
+from src.config import AVAILABLE_INTERVALS
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -22,8 +22,8 @@ def _sanitize(data):
     return data
 
 def calculate_rolling_zscore(series, window):
-    rolling_mean = series.ewm(span=window).mean()
-    rolling_std = series.ewm(span=window).std().replace(0, 1e-9)
+    rolling_mean = series.rolling(window).mean()
+    rolling_std = series.ewm(window).std().replace(0, 1e-9)
     return (series - rolling_mean) / rolling_std
 
 def pair_radar_ui():
@@ -31,7 +31,7 @@ def pair_radar_ui():
         ui.sidebar(
             ui.h4("Pair Analysis"),
             ui.input_action_button("btn_gen_pair", "Generate Radar", class_="btn-primary w-100 mt-3"),
-            ui.input_select("pair_interval", "Timeframe", choices=[], selected="1h"),
+            ui.input_select("pair_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1h"),
             ui.input_selectize("symbol_a", "Asset A", choices=[]),
             ui.input_selectize("symbol_b", "Asset B", choices=[]),
             ui.input_select("pair_mode", "Generation Mode", 
@@ -204,7 +204,10 @@ def pair_radar_server(input, output, session, global_interval):
 
             residuals = y - (slope * x + intercept)
 
-            adf_stat, adf_p, _, _, _, _ = adfuller(residuals)
+            if residuals.var() == 0:
+                adf_stat, adf_p = 0, 0
+            else:
+                adf_stat, adf_p, _, _, _, _ = adfuller(residuals)
 
             spread = residuals[-window:]
             spread_vol = np.std(spread) * np.sqrt(MetricsEngine.get_annual_scaling(interval))
@@ -258,10 +261,10 @@ def pair_radar_server(input, output, session, global_interval):
 
         # Recalculate rolling stats in real-time
         df['zscore'] = calculate_rolling_zscore(df['close'], window)
-        df['ema'] = df['close'].ewm(span=window, adjust=False).mean()
-        df['ema_std'] = df['close'].ewm(span=window, adjust=False).std()
-        df['bb_upper'] = df['ema'] + 2 * df['ema_std']
-        df['bb_lower'] = df['ema'] - 2 * df['ema_std']
+        df['ema'] = df['close'].rolling(window).mean()
+        df['ema_std'] = df['close'].ewm(window).std()
+        df['bb_upper'] = df['ema'] + 1.8 * df['ema_std']
+        df['bb_lower'] = df['ema'] - 1.8 * df['ema_std']
         
         # Correlations (Ret & Price)
         df['corr_pearson'] = df["log_ret_a"].rolling(window).corr(df["log_ret_b"])

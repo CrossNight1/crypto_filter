@@ -9,6 +9,7 @@ import plotly.figure_factory as ff
 from src.data import DataManager
 from ml_engine.analysis.correlation import CorrelationEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
+from src.config import AVAILABLE_INTERVALS
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -47,7 +48,7 @@ def multivariate_analysis_ui():
                         ),
                     ),
 
-                    ui.input_select("corr_interval", "Timeframe", choices=[]),
+                    ui.input_select("corr_interval", "Timeframe", choices=AVAILABLE_INTERVALS),
 
                     ui.input_numeric(
                         "window_size",
@@ -240,6 +241,10 @@ def multivariate_analysis_server(input, output, session):
 
             if not data_map:
                 return
+            
+            data_map = data_map[-input.window_size():]
+            data_map = data_map.dropna(axis=1, how="all")
+            data_map = data_map.dropna(axis=0, how="all")
 
             if structure == "Correlation":
                 raw_matrix = CorrelationEngine.calculate_matrix(
@@ -347,6 +352,10 @@ def multivariate_analysis_server(input, output, session):
         with ui.Progress(min=0, max=total) as p:
             p.set(0, message="Loading data...")
             data_map = _load_return_data(symbols, interval, p)
+
+            data_map = data_map[-input.window_size():]
+            data_map = data_map.dropna(axis=1, how="all")
+            data_map = data_map.dropna(axis=0, how="all")
 
             if not data_map:
                 ui.notification_show("No data loaded", type="error")
