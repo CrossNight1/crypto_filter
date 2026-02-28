@@ -114,9 +114,7 @@ def pair_radar_server(input, output, session, global_interval):
         all_syms = sorted(inventory.keys())
         ui.update_selectize("symbol_a", choices=all_syms, selected="BTCUSDT")
         ui.update_selectize("symbol_b", choices=all_syms, selected="ETHUSDT")
-        
-        intervals = sorted(list(set(i for ivs in inventory.values() for i in ivs)))
-        ui.update_select("pair_interval", choices=intervals, selected=global_interval.get())
+        ui.update_select("pair_interval", choices=AVAILABLE_INTERVALS, selected=global_interval.get())
 
     @reactive.Effect
     @reactive.event(input.btn_gen_pair)

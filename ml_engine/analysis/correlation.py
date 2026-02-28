@@ -21,9 +21,8 @@ class CorrelationEngine:
         def _adf_tstat(residual):
 
             r = np.asarray(residual, dtype=float)
-
             if len(r) < 5 or np.any(~np.isfinite(r)):
-                print("Invalid residual")
+                # print("Invalid residual")
                 return np.nan
 
             dr = np.diff(r)
@@ -38,7 +37,7 @@ class CorrelationEngine:
 
             dof = len(dr) - 2
             if dof <= 0:
-                print("Invalid dof")
+                # print("Invalid dof")
                 return np.nan
 
             s2 = np.sum(err**2) / dof
@@ -53,54 +52,34 @@ class CorrelationEngine:
 
             return beta[0] / se
 
-        wide_long = data_map[window_size:]
-        wide_short = data_map[window_size // 10:]
+        wide = data_map[-window_size:]
+        wide = wide.dropna(axis=1, how="any").dropna(axis=0, how="any")
+        wide = np.log(wide)
 
-        wide_long = wide_long.dropna(axis=0, how="any").dropna(axis=1, how="any")
-        wide_short = wide_short.dropna(axis=0, how="any").dropna(axis=1, how="any")
-
-        common_cols = wide_long.columns.intersection(wide_short.columns)
+        common_cols = wide.columns.intersection(wide.columns)
         cols = common_cols
 
         coint_long = pd.DataFrame(np.nan, index=cols, columns=cols)
-        coint_short = pd.DataFrame(np.nan, index=cols, columns=cols)
 
         for i in cols:
             for j in cols:
                 if i == j:
                     coint_long.loc[i, j] = 0
-                    coint_short.loc[i, j] = 0
                     continue
 
-                # ---------- LONG ----------
-                df_pair_long = pd.concat([wide_long[i], wide_long[j]], axis=1).dropna()
+                df_pair = pd.concat([wide[i], wide[j]], axis=1).dropna()
 
-                y = df_pair_long.iloc[:, 0].values
-                x = df_pair_long.iloc[:, 1].values
+                y = df_pair.iloc[:, 0].values
+                x = df_pair.iloc[:, 1].values
                 try:
                     r = _ols_residual(y, x)
                     coint_long.loc[i, j] = _adf_tstat(r)
                 except:
                     pass
 
-                # ---------- SHORT ----------
-                df_pair_short = pd.concat([wide_short[i], wide_short[j]], axis=1).dropna()
-
-                y = df_pair_short.iloc[:, 0].values
-                x = df_pair_short.iloc[:, 1].values
-                try:
-                    r = _ols_residual(y, x)
-                    coint_short.loc[i, j] = _adf_tstat(r)
-                except:
-                    pass
-
-        long_weight = 0.9
-        short_weight = 0.1
-
         coint_long = coint_long.fillna(0)
-        coint_short = coint_short.fillna(0)
 
-        return (long_weight * coint_long) + (short_weight * coint_short)
+        return coint_long
 
     @staticmethod
     def calculate_matrix(data_map, method="pearson", window_size=50):
@@ -139,8 +118,8 @@ class CorrelationEngine:
     def stabilize_matrix(matrix, eps=1e-6):
 
         matrix = matrix.replace([np.inf, -np.inf], np.nan)
-        matrix = matrix.dropna(axis=0, how="any")
         matrix = matrix.dropna(axis=1, how="any")
+        matrix = matrix.dropna(axis=0, how="any")
 
         # Force symmetry
         matrix = (matrix + matrix.T) / 2

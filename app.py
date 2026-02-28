@@ -25,7 +25,7 @@ from modules.pair_radar import pair_radar_ui, pair_radar_server
 from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # UI definition
 app_ui = ui.page_navbar(
@@ -144,7 +144,7 @@ def server(input, output, session):
         return ui.HTML(f"""
             <div style="font-size: 0.7rem; opacity: 0.7; color: white;">
                 <div>Global Data: {d['global']['oldest']} - {d['global']['latest']}</div>
-                <div>Current Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</div>
+                <div>Current Time: {(datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%d %H:%M:%S')}</div>
             </div>
         """)
     

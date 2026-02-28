@@ -10,6 +10,7 @@ from src.data import DataManager
 from ml_engine.analysis.correlation import CorrelationEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
 from src.config import AVAILABLE_INTERVALS
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -33,6 +34,13 @@ def multivariate_analysis_ui():
                         class_="btn-primary w-100 mt-3"
                     ),
 
+                    ui.input_text(
+                        "focus_corr_symbol",
+                        "Focus Symbol",
+                        value="",
+                        placeholder="e.g. BTCUSDT"
+                    ),
+
                     ui.input_select(
                         "dependence_structure",
                         "Dependence Structure",
@@ -48,7 +56,7 @@ def multivariate_analysis_ui():
                         ),
                     ),
 
-                    ui.input_select("corr_interval", "Timeframe", choices=AVAILABLE_INTERVALS),
+                    ui.input_select("corr_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1d"),
 
                     ui.input_numeric(
                         "window_size",
@@ -162,9 +170,9 @@ def multivariate_analysis_server(input, output, session):
         inventory = manager.get_inventory()
         if not inventory:
             return
-        intervals = sorted(list(set(i for ivs in inventory.values() for i in ivs)))
-        ui.update_select("corr_interval", choices=intervals)
-        ui.update_select("decomp_interval", choices=intervals)
+        # intervals = sorted(list(set(i for ivs in inventory.values() for i in ivs)))
+        ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected="1d")
+        ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected="1d")
 
     @reactive.effect
     def _():
@@ -195,30 +203,54 @@ def multivariate_analysis_server(input, output, session):
     # ── Helper: load return data ──────────────────────────────
 
     def _load_return_data(symbols, interval, progress=None):
-        """Shared helper to load log-return series for symbols."""
+        """Shared helper to load log-return series for symbols concurrently."""
         data_map = {}
-        for i, sym in enumerate(symbols):
-            df = manager.load_data(sym, interval)
-            if df is not None and not df.empty:
-                df = df.set_index("open_time")["close"]
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    ret_series = np.log(df / df.shift(1))
-                ret_series = ret_series.replace([np.inf, -np.inf], np.nan).dropna()
-                data_map[sym] = ret_series
-            if progress:
-                progress.set(i + 1)
+        
+        def fetch_symbol_returns(sym):
+            try:
+                df = manager.load_data(sym, interval)
+                if df is not None and not df.empty:
+                    close_vals = df.set_index("open_time")["close"]
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ret_series = np.log(close_vals / close_vals.shift(1))
+                    return sym, ret_series.replace([np.inf, -np.inf], np.nan).dropna()
+            except Exception as e:
+                print(f"Error loading {sym}: {e}")
+            return sym, None
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_sym = {executor.submit(fetch_symbol_returns, sym): sym for sym in symbols}
+            
+            for i, future in enumerate(as_completed(future_to_sym)):
+                sym, result = future.result()
+                if result is not None:
+                    data_map[sym] = result
+                if progress:
+                    progress.set(i + 1)
         return data_map
 
     def _load_price_data(symbols, interval, progress=None):
-        """Shared helper to load log-return series for symbols."""
+        """Shared helper to load price series for symbols concurrently."""
         data_map = {}
-        for i, sym in enumerate(symbols):
-            df = manager.load_data(sym, interval)
-            if df is not None and not df.empty:
-                df = df.set_index("open_time")["close"]
-                data_map[sym] = df
-            if progress:
-                progress.set(i + 1)
+        
+        def fetch_symbol_price(sym):
+            try:
+                df = manager.load_data(sym, interval)
+                if df is not None and not df.empty:
+                    return sym, df.set_index("open_time")["close"]
+            except Exception as e:
+                print(f"Error loading {sym}: {e}")
+            return sym, None
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_sym = {executor.submit(fetch_symbol_price, sym): sym for sym in symbols}
+            
+            for i, future in enumerate(as_completed(future_to_sym)):
+                sym, result = future.result()
+                if result is not None:
+                    data_map[sym] = result
+                if progress:
+                    progress.set(i + 1)
         return data_map
 
     # ══════════════════════════════════════════════════════════
@@ -237,45 +269,48 @@ def multivariate_analysis_server(input, output, session):
 
         with ui.Progress(min=0, max=len(symbols)) as p:
             p.set(message="Computing matrix...")
-            data_map = _load_return_data(symbols, interval, p)
-
-            if not data_map:
-                return
-            
-            data_map = data_map[-input.window_size():]
-            data_map = data_map.dropna(axis=1, how="all")
-            data_map = data_map.dropna(axis=0, how="all")
 
             if structure == "Correlation":
+                data_map = _load_return_data(symbols, interval, p)
+                if not data_map: return
                 raw_matrix = CorrelationEngine.calculate_matrix(
                     data_map,
                     method=input.corr_method(),
                     window_size=input.window_size()
                 )
             elif structure == "Covariance":
+                data_map = _load_return_data(symbols, interval, p)
+                if not data_map: return
                 raw_matrix = CorrelationEngine.calculate_covariance(
                     data_map,
                     window_size=input.window_size()
                 )
             elif structure == "Cointegration":
                 price = _load_price_data(symbols, interval, p)
-                price = pd.DataFrame(price)
+                if not price: return
+                price_df = pd.DataFrame(price)
                 raw_matrix = CorrelationEngine.calculate_coint_matrix(
-                    price,
+                    price_df,
                     window_size=input.window_size()
                 )
                 raw_matrix = raw_matrix * -1
                 
             elif structure == "Partial Correlation":
+                data_map = _load_return_data(symbols, interval, p)
+                if not data_map: return
                 raw_matrix = CorrelationEngine.calculate_partial_correlation(
                     data_map,
                     window_size=input.window_size()
                 )
             elif structure == "Precision Matrix":
+                data_map = _load_return_data(symbols, interval, p)
+                if not data_map: return
                 raw_matrix = CorrelationEngine.calculate_precision_matrix(
                     data_map,
                     window_size=input.window_size()
                 )
+            else:
+                return
 
             filtered_matrix, _ = CorrelationEngine.filter_blanks(raw_matrix)
             filtered_matrix = filtered_matrix.sort_values(by=filtered_matrix.columns[0], ascending=False)
@@ -285,8 +320,13 @@ def multivariate_analysis_server(input, output, session):
     def matrix_view():
         df = correlation_matrix.get()
         if df.empty:
-            print("Matrix is empty")
+            # print("Matrix is empty")
             return None
+
+        df = df[-input.window_size():]
+        df = df.dropna(axis=1, how="all")
+        df = df.dropna(axis=0, how="all")
+
         print("Matrix generated")
         return ui.div(
             ui.card(
@@ -302,7 +342,15 @@ def multivariate_analysis_server(input, output, session):
 
     @render.data_frame
     def matrix_table():
-        return correlation_matrix.get()
+        df = correlation_matrix.get()
+        if df.empty:
+            return None
+            
+        # Match cleaning logic applied in the view
+        df = df.dropna(axis=1, how="all")
+        df = df.dropna(axis=0, how="all")
+        
+        return df
 
     @render_widget
     def matrix_chart():
@@ -316,12 +364,50 @@ def multivariate_analysis_server(input, output, session):
         else:
             zmin, zmax = None, None
 
+        # Sanitize for Plotly
+        clean_df = _sanitize(df)
+
         fig = px.imshow(
-            _sanitize(df), text_auto=".2f", aspect="auto",
+            clean_df, text_auto=".2f", aspect="auto",
             color_continuous_scale="Spectral_r",
             zmin=zmin, zmax=zmax,
             template="plotly_dark"
         )
+
+        focus_sym = input.focus_corr_symbol().strip().upper()
+        if focus_sym:
+            # Check if symbol exists in columns or index
+            cols = list(clean_df.columns)
+            indices = list(clean_df.index)
+            
+            shapes = []
+            
+            if focus_sym in cols:
+                col_idx = cols.index(focus_sym)
+                # Highlight Column
+                shapes.append(dict(
+                    type="rect",
+                    xref="x", yref="paper",
+                    x0=col_idx - 0.5, y0=0,
+                    x1=col_idx + 0.5, y1=1,
+                    line=dict(color="#FF00FF", width=2),
+                    fillcolor="rgba(0,0,0,0)"
+                ))
+            
+            if focus_sym in indices:
+                row_idx = indices.index(focus_sym)
+                # Highlight Row
+                shapes.append(dict(
+                    type="rect",
+                    xref="paper", yref="y",
+                    x0=0, y0=row_idx - 0.5, 
+                    x1=1, y1=row_idx + 0.5,
+                    line=dict(color="#FF00FF", width=2),
+                    fillcolor="rgba(0,0,0,0)"
+                ))
+                
+            if shapes:
+                fig.update_layout(shapes=shapes)
         fig.update_layout(
             margin=dict(l=0, r=0, t=30, b=0),
             paper_bgcolor="#0b3d91",
@@ -352,10 +438,6 @@ def multivariate_analysis_server(input, output, session):
         with ui.Progress(min=0, max=total) as p:
             p.set(0, message="Loading data...")
             data_map = _load_return_data(symbols, interval, p)
-
-            data_map = data_map[-input.window_size():]
-            data_map = data_map.dropna(axis=1, how="all")
-            data_map = data_map.dropna(axis=0, how="all")
 
             if not data_map:
                 ui.notification_show("No data loaded", type="error")
@@ -566,7 +648,7 @@ def multivariate_analysis_server(input, output, session):
     def decomp_chart_1():
         res = decomp_result.get()
         if res is None:
-            return go.Figure()
+            return None
 
         method = res['method']
         d = res['data']
