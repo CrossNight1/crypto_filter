@@ -22,6 +22,7 @@ class SignalStrategy(bt.Strategy):
         self.trade_results = []
         self.signal_history = {}
         self.size_history = {}
+        self.equity_history = {}
 
         self.signal_dict = self.params.signals['signal'].to_dict() if self.params.signals is not None else {}
         self.vol_dict = self.params.volatility.to_dict() if self.params.volatility is not None else {}
@@ -89,6 +90,7 @@ class SignalStrategy(bt.Strategy):
         # Record state for plotting - include CLOSING positions as they still affect equity
         self.signal_history[current_idx] = sum([p['signal'] for p in self.open_positions if p['status'] in ['OPEN', 'CLOSING']]) if self.open_positions else 0
         self.size_history[current_idx] = sum([p['size'] * p['signal'] for p in self.open_positions if p['status'] in ['OPEN', 'CLOSING']]) if self.open_positions else 0
+        self.equity_history[current_idx] = self.broker.getvalue()
 
         signal = self.signal_dict.get(current_idx, 0)
         vol = self.vol_dict.get(current_idx, None)
@@ -200,26 +202,18 @@ class BacktestEngine:
         cerebro.broker.setcash(self.initial_cash)
         cerebro.broker.setcommission(commission=self.commission)
 
-        cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
-        cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
-        cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
-        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
-        cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
-
         results = cerebro.run()
         strat = results[0]
         final_value = cerebro.broker.getvalue()
 
         trade_results = pd.DataFrame(strat.trade_results) if strat.trade_results else pd.DataFrame()
 
-        timereturn = strat.analyzers.timereturn.get_analysis()
-        equity_curve = pd.Series(timereturn).sort_index()
-        equity_curve = (1 + equity_curve).cumprod() * self.initial_cash
-        equity_curve = equity_curve.reindex(df.index).fillna(method='ffill').fillna(self.initial_cash)
+        equity_curve = pd.Series(strat.equity_history).sort_index()
+        equity_curve = equity_curve.reindex(df.index).ffill().fillna(self.initial_cash)
 
         buy_hold_returns = df['close'].pct_change().fillna(0)
         buy_hold_equity = (1 + buy_hold_returns).cumprod() * self.initial_cash
-        buy_hold_equity = buy_hold_equity.reindex(df.index).fillna(method='ffill').fillna(self.initial_cash)
+        buy_hold_equity = buy_hold_equity.reindex(df.index).ffill().fillna(self.initial_cash)
 
         sig_hist = pd.Series(strat.signal_history).sort_index()
         sig_hist = sig_hist.reindex(df.index, fill_value=0)
@@ -227,14 +221,38 @@ class BacktestEngine:
         size_hist = pd.Series(strat.size_history).sort_index()
         size_hist = size_hist.reindex(df.index, fill_value=0)
 
+        # Manual Metrics Calculation
+        # 1. Sharpe Ratio
+        eq_returns = equity_curve.pct_change().fillna(0)
+        mean_ret = eq_returns.mean()
+        std_ret = eq_returns.std()
+        
+        # Determine frequency for annualization (defaulting to 1h if not inferrable)
+        from src.metrics import MetricsEngine
+        # We try to infer interval from index if possible, otherwise use a default or pass it?
+        # For now, let's assume 1h as a fallback or if we can get it from df.
+        # Often interval is available in the index frequency
+        interval = '1h' 
+        if hasattr(df.index, 'freq') and df.index.freq:
+             # Map pandas freq to binance interval if possible
+             pass 
+
+        ann_factor = MetricsEngine.get_annual_scaling(interval)
+        sharpe = (mean_ret / std_ret * np.sqrt(ann_factor)) if std_ret > 1e-9 else 0.0
+
+        # 2. Max Drawdown
+        running_max = equity_curve.cummax()
+        drawdown = (equity_curve / running_max) - 1
+        max_dd = drawdown.min() # This will be negative, e.g. -0.052
+
         metrics = {
             'initial_value': self.initial_cash,
             'final_value': final_value,
             'buy_hold_final_value': buy_hold_equity.iloc[-1],
             'total_return': (final_value - self.initial_cash) / self.initial_cash,
             'buy_hold_return': (buy_hold_equity.iloc[-1] - self.initial_cash) / self.initial_cash,
-            'sharpe_ratio': strat.analyzers.sharpe.get_analysis().get('sharperatio', 0),
-            'max_drawdown': strat.analyzers.drawdown.get_analysis().get('max', {}).get('drawdown', 0),
+            'sharpe_ratio': sharpe,
+            'max_drawdown': max_dd,
             'total_trades': len(trade_results),
             'winning_trades': len(trade_results[trade_results['outcome'] == 1]) if len(trade_results) > 0 else 0,
             'losing_trades': len(trade_results[trade_results['outcome'] == -1]) if len(trade_results) > 0 else 0,

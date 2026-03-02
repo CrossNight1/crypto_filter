@@ -56,12 +56,12 @@ def multivariate_analysis_ui():
                         ),
                     ),
 
-                    ui.input_select("corr_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1d"),
+                    ui.input_select("corr_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1h"),
 
                     ui.input_numeric(
                         "window_size",
                         "Window Size",
-                        value=50,
+                        value=100,
                         min=10,
                         max=2000
                     ),
@@ -69,7 +69,7 @@ def multivariate_analysis_ui():
                     ui.input_text(
                         "n_assets",
                         "Top Volume",
-                        value="10",
+                        value="20",
                         placeholder="e.g. 20",
                         update_on="blur"
                     ),
@@ -159,7 +159,7 @@ def multivariate_analysis_ui():
                     ui.input_numeric(
                         "decomp_window",
                         "Window Size",
-                        value=50,
+                        value=100,
                         min=10,
                         max=2000
                     ),
@@ -167,7 +167,7 @@ def multivariate_analysis_ui():
                     ui.input_text(
                         "decomp_n_assets",
                         "Top Volume",
-                        value="10",
+                        value="20",
                         placeholder="e.g. 20",
                         update_on="blur"
                     ),
@@ -203,8 +203,8 @@ def multivariate_analysis_server(input, output, session):
         if not inventory:
             return
         # intervals = sorted(list(set(i for ivs in inventory.values() for i in ivs)))
-        ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected="1d")
-        ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected="1d")
+        ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected="1h")
+        ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected="1h")
 
 
     @reactive.effect
@@ -862,21 +862,22 @@ def multivariate_analysis_server(input, output, session):
                 template="plotly_dark",
                 paper_bgcolor="#0b3d91",
                 plot_bgcolor="#0b3d91",
-                xaxis=dict(showticklabels=True, showgrid=False, mirror=True, tickangle=45, tickfont=dict(size=10, color='white')),
+                xaxis=dict(showticklabels=True, showgrid=False, mirror=False, tickangle=45, tickfont=dict(size=10, color='white')),
                 yaxis=dict(
                     title_text="Distance",
                     showticklabels=False,
                     showgrid=False,
                     gridcolor="rgba(255,255,255,0.2)",
                     zeroline=False,
-                    mirror=True
+                    mirror=False
                 ),
                 showlegend=False,
                 margin=dict(l=50, r=50, t=50, b=100)
             )
             fig.update_xaxes(gridcolor="rgba(255,255,255,0.2)", linecolor="white", tickcolor="white", zerolinecolor="white")
             fig.update_yaxes(gridcolor="rgba(255,255,255,0.2)", linecolor="white", tickcolor="white", zerolinecolor="white")
-
+            fig.update_xaxes(constrain='domain')
+            
             return fig
 
         # ── MST Network Graph ─────────────────────────────

@@ -9,10 +9,11 @@ from shinywidgets import output_widget, render_widget
 from statsmodels.tsa.arima.model import ARIMA
 from scipy.optimize import minimize
 from scipy.stats import skew, kurtosis
+from sklearn.linear_model import LinearRegression
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS
+from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO
 from src.logger import logger
 from ml_engine.labeling.labeler import Labeler
 from ml_engine.analysis.correlation import DecompositionEngine
@@ -106,7 +107,6 @@ def symbol_diagnostics_ui():
                 ui.input_numeric("diag_window", "Analysis Window", value=100, min=20, max=500),
                 ui.input_action_button("btn_run_diag", "Run Diagnostics", class_="btn-primary w-100 mt-2"),
                 ui.hr(),
-                ui.output_ui("data_status"),
             ),
             
             ui.navset_card_underline(
@@ -132,15 +132,15 @@ def symbol_diagnostics_ui():
                                 )
                             ),
                             
-                            # 2. Metrics & Factors
+                            # 2. Metrics & Exposure
                             ui.card(
-                                ui.card_header("Metrics & Factor Decomposition"),
+                                ui.card_header("Market-Neutral Analysis"),
                                 ui.layout_columns(
                                     ui.div(
                                         output_widget("plot_metrics")
                                     ),
                                     ui.div(
-                                        output_widget("plot_factors")
+                                        output_widget("plot_mn_cum_ret")
                                     ),
                                     col_widths=[6, 6]
                                 )
@@ -160,11 +160,11 @@ def symbol_diagnostics_ui():
                                 )
                             ),
                             
-                            # 4. Cointegration
-                            ui.card(
-                                ui.card_header("Cointegration & Correlation"),
-                                output_widget("plot_coint")
-                            )
+                            # # 4. Cointegration
+                            # ui.card(
+                            #     ui.card_header("Cointegration & Correlation"),
+                            #     output_widget("plot_coint")
+                            # )
                         )
                     )
                 ),
@@ -349,21 +349,28 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 beta_, alpha_, r2 = engine.calculate_beta_alpha(log_rets_aligned, bench_rets_aligned)
                 
             # Factor Decomp - Load ALL symbols for comprehensive analysis
-            all_syms = list(manager.get_inventory().keys())
             market_data = {}
-            for s in all_syms:
+            for s in MANDATORY_CRYPTO:
                 d = manager.load_data(s, interval)
                 if d is not None:
                     market_data[s] = pd.to_numeric(d['close'], errors='coerce').pct_change()
             
             factor_df = pd.DataFrame(market_data).ffill().fillna(0).tail(window)
+            mn_cum_ret = pd.Series()
+            
             if factor_df.shape[1] > 2:
-                decomp_res = DecompositionEngine.k_factor_decompose(factor_df, k=3)
+                decomp_res = DecompositionEngine.k_factor_decompose(factor_df, k=5)
                 sym_series = pd.Series(log_rets[-window:], index=factor_df.index)
-                factor_corrs = decomp_res['factor_returns'].corrwith(sym_series)
-            else:
-                factor_corrs = pd.Series()
-
+                
+                # Market Neutral Calculation: Regress sym_series against PC1
+                pc1 = decomp_res['factor_returns']['PC1'].values.reshape(-1, 1)
+                y = sym_series.values
+                
+                lr = LinearRegression()
+                lr.fit(pc1, y)
+                residuals = y - lr.predict(pc1)
+                mn_cum_ret = pd.Series(np.cumsum(residuals), index=factor_df.index)
+            
             p.set(70, message="Forecasting...")
             
             # 5. Forecast
@@ -461,7 +468,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 "metrics_df": latest_metrics.tail(1).T.reset_index(),
                 "beta": beta_,
                 "alpha": alpha_,
-                "factor_loadings": pd.DataFrame({"Factor": factor_corrs.index, "Correlation": factor_corrs.values}) if not factor_corrs.empty else pd.DataFrame(),
+                "mn_cum_ret": mn_cum_ret if not mn_cum_ret.empty else pd.Series(),
                 "fc_price": {"hist": history_price, "fc": fc_mean, "ci": fc_ci},
                 "fc_vol": {"hist": hist_vol, "fc": vol_forecast_vals},
                 "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values},
@@ -549,7 +556,6 @@ def symbol_diagnostics_server(input, output, session, global_interval):
 
         
         fig.update_layout(
-            title="Metrics",
             polar=dict(
                 bgcolor=THEME_BG,
                 radialaxis=dict(visible=True, gridcolor=THEME_GRID),
@@ -559,20 +565,30 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             plot_bgcolor=THEME_BG,
             font=dict(family=THEME_FONT, color=THEME_TEXT),
             showlegend=False,
-            height=350,
+            height=400,
             width=735
         )
         return apply_theme(fig)
 
     @render_widget
-    def plot_factors():
+    def plot_mn_cum_ret():
         d = diag_data.get()
-        if not d or d['factor_loadings'].empty: return go.Figure()
+        if not d or d['mn_cum_ret'].empty: return None
         
-        fig = px.bar(d['factor_loadings'], x="Factor", y="Correlation", template="plotly_dark", color="Correlation", color_continuous_scale="Spectral_r")
+        series = d['mn_cum_ret']
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=np.arange(len(series)),
+            y=series.values,
+            mode='lines',
+            line=dict(color='cyan', width=2),
+            name='MN Cum Ret'
+        ))
         fig.update_layout(
-            title="Principal Factor Loadings",
-            height=350, width=735)
+            title="Market-Neutral Cumulative Return (Ex-PC1)",
+            xaxis_title="Periods",
+            yaxis_title="Cumulative Return",
+            height=400, width=735)
         return apply_theme(fig)
 
     @render_widget

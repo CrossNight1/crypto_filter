@@ -36,8 +36,59 @@ from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, ca
 
 def meta_sizing_cal(meta_probs):
     """Calibrate meta probabilities to sizing"""
-    return np.clip(meta_probs, 0, 1)
-    # return np.where(meta_probs > 0.5, 1, 0)
+    return np.clip(2 * meta_probs - 1, 0, 1)
+    # return np.where(meta_probs > 0.5, meta_probs, 0)
+
+def recursive_unwrap(model):
+    """Recursively peel off model wrappers to find the base model for SHAP."""
+    # Handle StatsModelsWrapper or similar that stores results in .results
+    if hasattr(model, 'results'):
+        return model.results
+    if hasattr(model, 'model'):
+        return recursive_unwrap(model.model)
+    return model
+
+def force_scalar_numeric(df):
+    """Deep cleaning to extract scalars from boxed numpy arrays and convert to float."""
+    def flatten_cell(x):
+        try:
+            # Recursively unbox if it's a collection (list, ndarray)
+            if isinstance(x, (list, np.ndarray, tuple)):
+                if hasattr(x, '__len__') and len(x) > 0:
+                    return flatten_cell(x[0]) # Take first element if it's a vector
+                return 0.0
+            return float(x)
+        except (ValueError, TypeError, IndexError):
+            return 0.0
+    
+    # Map element-wise to flatten every single cell
+    return df.applymap(flatten_cell).astype(float)
+
+def get_shap_explainer(model, X_sample):
+    """Select the most appropriate SHAP explainer for a given model."""
+    raw_model = recursive_unwrap(model)
+    
+    # Try TreeExplainer for tree-based models (XGB, RF)
+    try:
+        from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+        from xgboost import XGBRegressor, XGBClassifier
+        if isinstance(raw_model, (RandomForestRegressor, RandomForestClassifier, XGBRegressor, XGBClassifier)):
+            return shap.TreeExplainer(raw_model)
+    except ImportError:
+        pass
+        
+    # Fallback to generic Explainer, but pass the prediction function for better compatibility
+    try:
+        if hasattr(raw_model, 'predict_proba'):
+            # For classification, explain probabilities of the positive class or all classes
+            return shap.Explainer(raw_model.predict_proba, X_sample)
+        elif hasattr(raw_model, 'predict'):
+            return shap.Explainer(raw_model.predict, X_sample)
+    except Exception:
+        pass
+        
+    # Last resort: let SHAP try to guess
+    return shap.Explainer(raw_model)
 
 def predictive_ui():
     return ui.layout_sidebar(
@@ -880,6 +931,9 @@ def predictive_server(input, output, session):
                 Y_data = final_df['Target_Y'].copy()
                 Y_ret = final_df['raw_return']
                 
+                # Aggressive numeric force for all features (handle boxed values/strings)
+                X_data = force_scalar_numeric(X_data)
+                
                 # Clean Infs/NaNs
                 combined = pd.concat([X_data, Y_data, Y_ret], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
                 X_data, Y_data, Y_ret = combined[x_features], combined['Target_Y'], combined['raw_return']
@@ -1115,28 +1169,48 @@ def predictive_server(input, output, session):
                     logger.log("Predictive", "INFO", "Step 4.2: Calculating SHAP values")
                     step += 1
                     p.set(step, message="Calculating SHAP values...")
-                    # Primary Model SHAP (Tree-based if RF/XGB)
+                    # Primary Model SHAP
                     if model is not None:
                         # Use a sample of test data for SHAP to keep it fast
                         X_shap_primary = X_test.iloc[-300:] if len(X_test) > 300 else X_test
-                        raw_primary = getattr(model, 'model', model)
-                        explainer_primary = shap.Explainer(raw_primary)
-                        shap_values_primary = explainer_primary(X_shap_primary)
-                        shap_results['primary'] = {
-                            'values': shap_values_primary,
-                            'features': X_test.columns.tolist()
-                        }
+                        # Extra safety: aggressively unbox/flatten for SHAP
+                        X_shap_primary = force_scalar_numeric(X_shap_primary)
+                        
+                        # Diagnostic: Check for non-numeric data that might still be present
+                        for col in X_shap_primary.columns:
+                            if not pd.api.types.is_numeric_dtype(X_shap_primary[col]):
+                                logger.log("Predictive", "WARNING", f"Column {col} is NOT numeric! Sample: {X_shap_primary[col].head(2).tolist()}")
+                        
+                        try:
+                            explainer_primary = get_shap_explainer(model, X_shap_primary)
+                            shap_values_primary = explainer_primary(X_shap_primary)
+                            shap_results['primary'] = {
+                                'values': shap_values_primary,
+                                'features': X_test.columns.tolist()
+                            }
+                        except Exception as e:
+                            logger.log("Predictive", "WARNING", f"Primary SHAP failed: {e}")
                     
-                    # Meta Model SHAP (Linear)
+                    # Meta Model SHAP
                     if meta_model is not None:
                         X_shap_meta = meta_test_features.iloc[-300:] if len(meta_test_features) > 300 else meta_test_features
-                        raw_meta = getattr(meta_model, 'model', meta_model)
-                        explainer_meta = shap.Explainer(raw_meta, meta_features)
-                        shap_values_meta = explainer_meta(X_shap_meta)
-                        shap_results['meta'] = {
-                            'values': shap_values_meta,
-                            'features': meta_test_features.columns.tolist()
-                        }
+                        # Extra safety: aggressively unbox/flatten for SHAP
+                        X_shap_meta = force_scalar_numeric(X_shap_meta)
+                        
+                        # Diagnostic: Check for non-numeric data
+                        for col in X_shap_meta.columns:
+                            if not pd.api.types.is_numeric_dtype(X_shap_meta[col]):
+                                logger.log("Predictive", "WARNING", f"Meta column {col} is NOT numeric! Sample: {X_shap_meta[col].head(2).tolist()}")
+                        
+                        try:
+                            explainer_meta = get_shap_explainer(meta_model, X_shap_meta)
+                            shap_values_meta = explainer_meta(X_shap_meta)
+                            shap_results['meta'] = {
+                                'values': shap_values_meta,
+                                'features': meta_test_features.columns.tolist()
+                            }
+                        except Exception as e:
+                            logger.log("Predictive", "WARNING", f"Meta SHAP failed: {e}")
                     logger.log("Predictive", "INFO", "SHAP calculation complete")
                 except Exception as se:
                     logger.log("Predictive", "WARNING", f"SHAP calculation failed: {str(se)}")
@@ -1577,8 +1651,11 @@ def predictive_server(input, output, session):
                             X_m = pd.concat([X_pred, pd.Series([signal], index=X_pred.index, name='primary_pred')], axis=1)
                             probs = meta_model.predict_proba(X_m)[0]
                             idx_1 = np.where(meta_model.classes_ == 1)[0]
-                            meta_probs = meta_probs[:, idx_1[0]]
-                            meta_sizing = meta_sizing_cal(meta_probs)
+                            if len(idx_1) > 0:
+                                meta_prob = probs[idx_1[0]]
+                                meta_sizing = meta_sizing_cal(meta_prob)
+                            else:
+                                meta_sizing = 0.0
 
                         row = {"Ticker": sym, "Price": f"{latest_price:,.2f}", "Sizing": f"{meta_sizing:.1%}"}
                         if is_classification:
@@ -1599,7 +1676,7 @@ def predictive_server(input, output, session):
                         
                         prediction_rows.append(row)
                 except Exception as e:
-                    pass
+                    logger.log("Predictive", "WARNING", f"Live prediction for {sym} failed: {e}")
                 
                 p.set(i + 1)
                 await asyncio.sleep(0.01)
@@ -2243,30 +2320,43 @@ def predictive_server(input, output, session):
                 "Total Profits": equity_bench.iloc[-1] - 1,
                 "Win Rate": (y_ret_test > 0).sum() / len(y_ret_test) if len(y_ret_test) > 0 else 0,
                 "Trades": 0,
-                "Sharpe": (y_ret_test.mean() / y_ret_test.std() * np.sqrt(MetricsEngine.get_annual_scaling(res['interval']))) if y_ret_test.std() > 1e-9 else 0,
-                "Max Drawdown": ((equity_bench / equity_bench.cummax()) - 1).min()
+                "Sharpe": (y_ret_test.mean() / y_ret_test.std() * np.sqrt(MetricsEngine.get_annual_scaling(res['interval']))) if y_ret_test.std() > 1e-12 else 0.0,
+                "Max Drawdown": -1 * abs(((equity_bench / equity_bench.cummax()) - 1).min()) * 100 if not equity_bench.empty else 0.0
             }
+
+            # Clean NaNs in raw and meta metrics
+            for m in [raw_m, meta_m]:
+                for k in ['total_return', 'win_rate', 'sharpe_ratio', 'max_drawdown']:
+                    if not np.isfinite(m.get(k, 0)):
+                        m[k] = 0.0
+                        
+            # Clean benchmarks
+            for k in ["Sharpe", "Max Drawdown", "Total Profits", "Win Rate"]:
+                if not np.isfinite(bench_m.get(k, 0)):
+                    bench_m[k] = 0.0
 
             df = pd.DataFrame([
                 {
                     "Strategy": "Raw Signal",
-                    "Total Profits": raw_m['total_return'],
-                    "Win Rate": raw_m['win_rate'],
-                    "Trades": raw_m['total_trades'],
-                    "Sharpe": raw_m['sharpe_ratio'],
-                    "Max Drawdown": raw_m['max_drawdown']
+                    "Total Profits": raw_m.get('total_return', 0.0),
+                    "Win Rate": raw_m.get('win_rate', 0.0),
+                    "Trades": raw_m.get('total_trades', 0),
+                    "Sharpe": raw_m.get('sharpe_ratio', 0.0),
+                    "Max Drawdown": raw_m.get('max_drawdown', 0.0) * 100
                 },
                 {
                     "Strategy": "Meta Optimized",
-                    "Total Profits": meta_m['total_return'],
-                    "Win Rate": meta_m['win_rate'],
-                    "Trades": meta_m['total_trades'],
-                    "Sharpe": meta_m['sharpe_ratio'],
-                    "Max Drawdown": meta_m['max_drawdown']
+                    "Total Profits": meta_m.get('total_return', 0.0),
+                    "Win Rate": meta_m.get('win_rate', 0.0),
+                    "Trades": meta_m.get('total_trades', 0),
+                    "Sharpe": meta_m.get('sharpe_ratio', 0.0),
+                    "Max Drawdown": meta_m.get('max_drawdown', 0.0) * 100
                 },
                 bench_m
             ])
         else:
+            # Fallback for empty results
+            # ... (the rest of the fallback code remains)
             # Fallback to naive metrics
             model = res['model']
             X_test = res['X_test']
@@ -2294,21 +2384,27 @@ def predictive_server(input, output, session):
             bt['Meta'] = bt['Raw'] * meta_sizing
             
             def get_stats(series, label):
-                ret = series
+                ret = series.replace([np.inf, -np.inf], 0).fillna(0)
                 equity = np.exp(ret.cumsum())
                 total_ret = equity.iloc[-1] - 1
                 active = ret[ret != 0]
                 win_rate = (active > 0).sum() / len(active) if len(active) > 0 else 0
                 ann_factor = MetricsEngine.get_annual_scaling(res['interval'])
-                sharpe = (ret.mean() * ann_factor / (ret.std() * np.sqrt(ann_factor))) if ret.std() > 1e-9 else 0
-                max_dd = ((equity / equity.cummax()) - 1).min() * -1 * 100
+                
+                std = ret.std()
+                if std > 1e-12:
+                    sharpe = (ret.mean() / std) * np.sqrt(ann_factor)
+                else:
+                    sharpe = 0.0
+                    
+                max_dd = abs(((equity / equity.cummax()) - 1).min()) * 100
                 return {
                     "Strategy": label,
                     "Total Profits": total_ret,
                     "Win Rate": win_rate,
                     "Trades": len(active) if label != "Benchmark" else 0,
-                    "Sharpe": sharpe,
-                    "Max Drawdown": max_dd
+                    "Sharpe": sharpe if np.isfinite(sharpe) else 0.0,
+                    "Max Drawdown": max_dd if np.isfinite(max_dd) else 0.0
                 }
             
             df = pd.DataFrame([

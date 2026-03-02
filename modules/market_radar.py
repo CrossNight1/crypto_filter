@@ -24,24 +24,18 @@ def market_radar_ui():
                         "btn_calc_snapshot",
                         "Load Data",
                         class_="btn-primary w-100 mb-2"
-                    ),                 
+                    ),
                     ui.input_text(
                         "focus_symbol",
                         "Focus Symbol",
                         value="",
                         placeholder="e.g. BTCUSDT"
                     ),
-                    ui.input_selectize(
-                        "exclude_symbols",
-                        "Exclude Symbols",
-                        choices=[],
-                        selected=[],
-                        multiple=True
-                    ),
+
                     ui.input_select(
                         "radar_interval",
                         "Interval",
-                        selected="1d",
+                        selected="1h",
                         choices=AVAILABLE_INTERVALS
                     ),
 
@@ -74,7 +68,8 @@ def market_radar_ui():
                     ui.input_select(
                         "z_axis",
                         "Z Axis",
-                        choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}}
+                        choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}},
+                        selected=ALL_METRICS[3]
                     ),
 
                     # ----- LOG SCALE (single row) -----
@@ -95,6 +90,23 @@ def market_radar_ui():
                         "show_regression",
                         "Show Regression Line",
                         value=True
+                    ),   
+
+                    ui.hr(class_="mt-2 mb-2"),              
+                    ui.input_text(
+                        "n_assets_radar",
+                        "Top Volume",
+                        value="20",
+                        placeholder="e.g. 20",
+                        update_on="blur"
+                    ),
+
+                    ui.input_selectize(
+                        "radar_symbols",
+                        "Select Symbols",
+                        choices=[],
+                        selected=[],
+                        multiple=True
                     )
                 ),
                 ui.div(
@@ -138,7 +150,7 @@ def market_radar_ui():
                         "rpg_interval",
                         "Interval",
                         choices=AVAILABLE_INTERVALS,
-                        selected="1d"
+                        selected="1h"
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -231,15 +243,62 @@ def market_radar_server(input, output, session, global_interval):
     snapshot_data = reactive.Value(pd.DataFrame())
     rpg_data = reactive.Value(pd.DataFrame())
     selected_symbol_data = reactive.Value(None)
+    
+    # Track selected symbols for snapshot
+    selected_symbols_radar = reactive.Value(set())
 
     logger.log("Market Radar", "INFO", "Server initialized")
 
     @reactive.effect
-    def _():
+    def _initialize_symbols():
+        # Initial population of symbols based on top volume if empty
+        if not selected_symbols_radar.get():
+            try:
+                n = int(input.n_assets_radar() or 20)
+                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+                selected_symbols_radar.set(set(MANDATORY_CRYPTO).union(syms))
+            except:
+                selected_symbols_radar.set(set(MANDATORY_CRYPTO))
+
+    @reactive.effect
+    def _update_symbol_choices():
         interval = input.radar_interval()
         inventory = manager.get_inventory()
+        if not inventory:
+            return
+            
         available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
-        ui.update_selectize("exclude_symbols", choices=available_syms, selected=input.exclude_symbols())
+        curr_sel = sorted(list(selected_symbols_radar.get()))
+        
+        ui.update_selectize("radar_symbols", choices=available_syms, selected=curr_sel)
+
+    @reactive.effect
+    @reactive.event(input.n_assets_radar)
+    def _handle_top_volume():
+        try:
+            val = input.n_assets_radar()
+            if not val: return
+            n_assets = int(val)
+        except ValueError:
+            return
+            
+        interval = input.radar_interval()
+        
+        with ui.Progress(min=0, max=100) as p:
+            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
+            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            selected_symbols_radar.set(set(syms))
+            
+            inventory = manager.get_inventory()
+            sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("radar_symbols", choices=sym_choices, selected=syms)
+            
+            # Sync data for these symbols
+            p.set(20, message="Syncing data...")
+            # Optional: Add background sync here if needed, similar to multivariate
+            
+            p.set(100, message="Sync complete")
 
     @reactive.effect
     def _sync_focus_symbol():
@@ -257,11 +316,11 @@ def market_radar_server(input, output, session, global_interval):
             logger.log("Market Radar", "INFO", f"Using interval: {interval}")
             
             inventory = manager.get_inventory()
-            symbols = [s for s, inters in inventory.items() if interval in inters]
-            logger.log("Market Radar", "INFO", f"Found {len(symbols)} symbols in inventory")
+            symbols = list(input.radar_symbols())
+            logger.log("Market Radar", "INFO", f"Calculating metrics for {len(symbols)} symbols")
             
             if not symbols:
-                ui.notification_show("No data found for this interval. Use Data Loader first.", type="warning")
+                ui.notification_show("Please select symbols for analysis.", type="warning")
                 return
 
             with ui.Progress(min=0, max=len(symbols)) as p:
@@ -334,38 +393,70 @@ def market_radar_server(input, output, session, global_interval):
     def rpg_ready():
         return "true" if not rpg_data.get().empty else "false"
     
-    @render.data_frame
-    def snapshot_table():
+    @reactive.calc
+    def filtered_snapshot_df():
         df = snapshot_data.get()
         if df.empty:
             return df
         
-        exclude_list = list(input.exclude_symbols())
-        if exclude_list:
-            df = df[~df['symbol'].isin(exclude_list)]
+        # Apply Exclude Symbols filter reactively
+        # Now we use radar_symbols as positive inclusion
+        selected = list(input.radar_symbols())
+        if selected:
+            df = df[df['symbol'].isin(selected)]
+            
+        if input.drop_zeros():
+            df = df[df['volatility'] > 1e-9]
             
         return df
 
+    @reactive.calc
+    def snapshot_regression_params():
+        plot_df = filtered_snapshot_df()
+        if len(plot_df) <= 1:
+            return None
+            
+        x, y = input.x_axis(), input.y_axis()
+        
+        try:
+            # Ensure selected columns are numeric
+            reg_x = pd.to_numeric(plot_df[x], errors='coerce').values
+            reg_y = pd.to_numeric(plot_df[y], errors='coerce').values
+            
+            # Filter out NaNs or Infs
+            mask = np.isfinite(reg_x) & np.isfinite(reg_y)
+            reg_x, reg_y = reg_x[mask], reg_y[mask]
+            
+            if len(reg_x) > 1:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(reg_x, reg_y)
+                
+                # Generate line points
+                x_range = np.linspace(reg_x.min(), reg_x.max(), 100)
+                y_range = intercept + slope * x_range
+                
+                return {
+                    "x_range": x_range,
+                    "y_range": y_range,
+                    "r_squared": r_value**2,
+                    "intercept": intercept,
+                    "slope": slope
+                }
+        except Exception as e:
+            logger.log("Market Radar", "ERROR", f"Regression calculation error: {e}")
+            
+        return None
+
+    @render.data_frame
+    def snapshot_table():
+        return filtered_snapshot_df()
+
     @render_widget
     def snapshot_chart():
-        df = snapshot_data.get()
-        if df.empty: return go.Figure()
-
-        # Work on a copy to avoid side effects
-        plot_df = df.copy()
-
-        # Apply Exclude Symbols filter reactively
-        exclude_list = list(input.exclude_symbols())
-        if exclude_list:
-            plot_df = plot_df[~plot_df['symbol'].isin(exclude_list)]
-
-        if input.drop_zeros():
-            plot_df = plot_df[plot_df['volatility'] > 1e-9]
-
+        plot_df = filtered_snapshot_df()
         if plot_df.empty:
             # Return empty figure with message if possible, or just empty
             fig = go.Figure()
-            fig.add_annotation(text="No data matching filters", showarrow=False, font=dict(size=20))
+            fig.add_annotation(text="No data matching filters or symbols not loaded", showarrow=False, font=dict(size=20))
             fig.update_layout(template="plotly_dark")
             return fig
 
@@ -379,7 +470,7 @@ def market_radar_server(input, output, session, global_interval):
         if z != "None" and z in plot_df.columns:
             plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0)
             # px.scatter size must be positive
-            plot_df['z_marker_size'] = plot_df[z].abs() + 1e-9
+            plot_df['z_marker_size'] = plot_df[z].abs() + 5
             
             fig = px.scatter(
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
@@ -412,7 +503,7 @@ def market_radar_server(input, output, session, global_interval):
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
             height=600,
-            width=1490,
+            width=1470,
             font=dict(family="Space Mono", color="white"),
             xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
             yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
@@ -450,10 +541,16 @@ def market_radar_server(input, output, session, global_interval):
                         f'{METRIC_LABELS.get(y, y)}: %{{y}}<br>' +
                         '<extra></extra>',
             selectedpoints=selected_points,
+            marker=dict(
+                line=dict(
+                    color="white",
+                    width=1
+                )
+            ),
             selected=dict(
                 marker=dict(
-                    color='#FF3B3B',
-                    size=selection_size,
+                    # color='#FF3B3B',
+                    # size=selection_size,
                     opacity=1
                 )
             ),
@@ -466,36 +563,19 @@ def market_radar_server(input, output, session, global_interval):
 
         fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
         fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
-
+ 
         # --- Regression Line ---
-        if input.show_regression() and len(plot_df) > 1:
-            try:
-                # Calculate regression on linear data
-                reg_x = plot_df[x].values
-                reg_y = plot_df[y].values
-                
-                # Filter out NaNs or Infs
-                mask = np.isfinite(reg_x) & np.isfinite(reg_y)
-                reg_x, reg_y = reg_x[mask], reg_y[mask]
-                
-                if len(reg_x) > 1:
-                    slope, intercept, r_value, p_value, std_err = stats.linregress(reg_x, reg_y)
-                    
-                    # Generate line points
-                    x_range = np.linspace(reg_x.min(), reg_x.max(), 100)
-                    y_range = intercept + slope * x_range
-                    
-                    fig.add_trace(go.Scatter(
-                        x=x_range,
-                        y=y_range,
-                        mode='lines',
-                        name=f'Fit (R²={r_value**2:.3f} | intercept={intercept:.3f} | slope={slope:.3f})',
-                        line=dict(color='orange', width=2, dash='dash'),
-                        hoverinfo='skip'
-                    ))
-
-            except Exception as e:
-                logger.log("Market Radar", "ERROR", f"Regression error: {e}")
+        reg = snapshot_regression_params()
+        if input.show_regression(): 
+            if reg:
+                fig.add_trace(go.Scatter(
+                    x=reg["x_range"],
+                    y=reg["y_range"],
+                    mode='lines',
+                    name=f'Fit (R²={reg["r_squared"]:.3f} | intercept={reg["intercept"]:.3f} | slope={reg["slope"]:.3f})',
+                    line=dict(color='orange', width=2, dash='dash'),
+                    hoverinfo='skip'
+                ))
 
         return fig
     

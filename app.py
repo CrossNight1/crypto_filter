@@ -34,10 +34,17 @@ app_ui = ui.page_navbar(
         ui.tags.script("""
             document.addEventListener("keydown", function(e) {
                 const box = document.getElementById("quick_symbol");
-                if (!box) return;
+                const n_assets_box = document.querySelector('input[id$="n_assets"]');
+                const decomp_n_assets_box = document.querySelector('input[id$="decomp_n_assets"]');
+                
                 if (document.activeElement === box && e.key === "Enter") {
                     e.preventDefault();
                     Shiny.setInputValue("quick_symbol_enter", Math.random(), {priority: "event"});
+                }
+                
+                // For n_assets inputs, we just want to trigger a blur to update the value
+                if ((document.activeElement === n_assets_box || document.activeElement === decomp_n_assets_box) && e.key === "Enter") {
+                    document.activeElement.blur();
                 }
             });
             $(document).on('bslib.card.expand', function(event) {
@@ -65,7 +72,7 @@ app_ui = ui.page_navbar(
                     ),
                     ui.card(
                         ui.card_header("Market Radar"),
-                        ui.p("Real-time relative performance & momentum tracking."),
+                        ui.p("Real-time relative performance & metrics tracking."),
                         ui.input_action_button("go_radar", "open_radar", class_="btn-primary w-100")
                     ),
                     ui.card(
@@ -97,10 +104,10 @@ app_ui = ui.page_navbar(
     ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
     ui.nav_panel("PREDICTIVE", predictive_ui()),
-    ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
+    # ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
-    ui.nav_spacer(),
-    ui.nav_control(ui.output_ui("data_status_")),
+    # ui.nav_spacer(),
+    # ui.nav_control(ui.output_ui("data_status_")),
     ui.nav_spacer(),
     ui.nav_control(
         ui.div(
