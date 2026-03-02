@@ -529,7 +529,8 @@ def pair_radar_server(input, output, session, global_interval):
             return None
 
         mode = input.copula_mode()
-        df_plot = df.tail(input.pair_window()).copy()
+        w = max(input.pair_window(), 10)
+        df_plot = df.tail(w).copy()
 
         if mode == "price":
             x = np.exp(df_plot["price_a"].values)

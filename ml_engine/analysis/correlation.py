@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
 from scipy.sparse.csgraph import minimum_spanning_tree as scipy_mst
-from sklearn.decomposition import FastICA
+from sklearn.decomposition import FastICA, PCA
 
 class CorrelationEngine:
     """
@@ -201,18 +201,56 @@ class DecompositionEngine:
     """Spectral, statistical, and structural decomposition of matrices."""
 
     @staticmethod
-    def eigen_decompose(matrix):
-        """Eigenvalue decomposition Σ = QΛQ^T."""
-        vals = np.linalg.eigvalsh(matrix.values)
-        eigenvalues = np.sort(vals)[::-1]
-        total = eigenvalues.sum()
-        explained = eigenvalues / total if total > 0 else eigenvalues * 0
+    def pca_decompose(returns_df, n_components=5):
+        """Principal Component Analysis omitting the 1st component (market factor)."""
+        data_clean = returns_df.dropna(axis=1, how='any').dropna(axis=0, how='any')
+        n_assets = data_clean.shape[1]
+        n_samples = data_clean.shape[0]
+        
+        # Fit K + 1 components to account for removing the market factor
+        # K is the user-requested dimensions AFTER removing market
+        k_user = min(n_components, 5, n_assets - 1, n_samples - 1)
+        k_user = max(k_user, 1) # Ensure at least one
+        k_fit = k_user + 1
+        
+        pca = PCA(n_components=k_fit, random_state=42)
+        pca.fit(data_clean.values)
+        
+        # explained_ratio: how much variance each component captures
+        explained = pca.explained_variance_ratio_
         cumulative = np.cumsum(explained)
+        
+        # factor_returns: the principal component time-series
+        factor_returns = pca.transform(data_clean.values)
+        
+        # Create a "Market-Neutral" version of factor returns by zeroing out the 1st component
+        neutral_factors = factor_returns.copy()
+        neutral_factors[:, 0] = 0
+        
+        # Reconstruction using only components 2..K+1
+        reconstructed_returns = pca.inverse_transform(neutral_factors)
+        reconstructed_df = pd.DataFrame(
+            reconstructed_returns,
+            index=data_clean.index,
+            columns=data_clean.columns
+        )
+        
+        eigenvalues = pca.explained_variance_
+        col_names = [f"PC{i+1}" for i in range(k_fit)]
+        loadings = pca.components_.T * np.sqrt(np.maximum(eigenvalues, 0))
+
         return {
             'eigenvalues': eigenvalues,
             'explained_ratio': explained,
             'cumulative': cumulative,
-            'labels': matrix.columns.tolist()
+            'loadings': pd.DataFrame(loadings, index=data_clean.columns, columns=col_names),
+            'factor_returns': pd.DataFrame(factor_returns, index=data_clean.index, columns=col_names),
+            'reconstructed_returns': reconstructed_df,
+            'reconstructed': reconstructed_df.corr(),
+            'k': k_user,
+            'k_fit': k_fit,
+            'is_market_neutral': True,
+            'labels': data_clean.columns.tolist()
         }
 
     @staticmethod
@@ -264,16 +302,20 @@ class DecompositionEngine:
         eigenvectors = eigenvectors[:, idx]
 
         N = len(eigenvalues)
-        k = min(k, N)
-
+        
+        # If Systematic (top), use ONLY PC1
+        # If Idiosyncratic (bottom), remove ONLY PC1 (use PC2..PCN)
         if mode == 'top':
+            k = 1
             selected_evals = eigenvalues[:k]
             V_k = eigenvectors[:, :k]
-            col_names = [f"F{i+1}" for i in range(k)]
+            col_names = [f"PC{i+1}" for i in range(k)]
         else:
-            selected_evals = eigenvalues[-k:]
-            V_k = eigenvectors[:, -k:]
-            col_names = [f"F{N-k+i+1}" for i in range(k)]
+            # Idiosyncratic: Use all components EXCEPT the first one
+            k = max(1, N - 1)
+            selected_evals = eigenvalues[1:1+k]
+            V_k = eigenvectors[:, 1:1+k]
+            col_names = [f"PC{i+2}" for i in range(k)]
 
         factor_returns = returns_df.values @ V_k
         reconstructed_returns = factor_returns @ V_k.T
@@ -294,6 +336,8 @@ class DecompositionEngine:
 
         total = eigenvalues.sum()
         variance_captured = selected_evals.sum() / total if total > 0 else 0
+        explained = eigenvalues / total if total > 0 else eigenvalues * 0
+        cumulative = np.cumsum(explained)
 
         return {
             'factor_returns': factor_returns_df,
@@ -301,9 +345,12 @@ class DecompositionEngine:
             'reconstructed': reconstructed_df.corr(),
             'loadings': pd.DataFrame(loadings, index=returns_df.columns, columns=col_names),
             'eigenvalues': eigenvalues,
+            'explained_ratio': explained,
+            'cumulative': cumulative,
             'variance_captured': variance_captured,
             'k': k,
-            'mode': mode
+            'mode': mode,
+            'labels': returns_df.columns.tolist()
         }
 
     @staticmethod
@@ -325,7 +372,8 @@ class DecompositionEngine:
         merge_dists = Z[:, 2]
         gaps = np.diff(merge_dists)
         n_clusters = len(labels) - np.argmax(gaps) - 1 if len(gaps) > 0 else 2
-        n_clusters = max(2, min(n_clusters, len(labels) // 2))
+        # Max 5 clusters as requested
+        n_clusters = max(2, min(n_clusters, 5))
 
         cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
 
@@ -368,6 +416,209 @@ class DecompositionEngine:
             'spillover': spillover
         }
 
+    @staticmethod
+    def vol_spillover(vol_matrix, H=10, alpha=0.001):
+        import numpy as np
+        import networkx as nx
+        from sklearn.linear_model import LassoCV
+        from sklearn.preprocessing import StandardScaler
+
+        # Drop zero-variance columns
+        vol_matrix = vol_matrix.loc[:, vol_matrix.std(axis=0) > 1e-10]
+        if vol_matrix.empty or vol_matrix.shape[1] < 2:
+            return {'edges': [], 'labels': [], 'n_edges': 0, 'spillover': {}, 
+                    'in_spillover': {}, 'out_spillover': {}, 'total_spillover_index': 0}
+
+        X = np.log(vol_matrix.values + 1e-8)
+        Z = StandardScaler().fit_transform(X)
+
+        T, N = Z.shape
+        p = 1  # lag 1
+
+        if T <= p:
+            return {'edges': [], 'labels': [], 'n_edges': 0, 'spillover': {}, 
+                    'in_spillover': {}, 'out_spillover': {}, 'total_spillover_index': 0}
+
+        Z_curr = Z[p:]
+        Z_lag = Z[:-p]
+
+        A = np.zeros((N, N))
+        residuals = np.zeros((T-p, N))
+
+        for i in range(N):
+            try:
+                model = LassoCV(cv=5, fit_intercept=False, max_iter=2000, tol=1e-3, selection='random').fit(Z_lag, Z_curr[:, i])
+                A[i, :] = model.coef_
+                residuals[:, i] = Z_curr[:, i] - Z_lag @ model.coef_
+            except:
+                try:
+                    coef, _, _, _ = np.linalg.lstsq(Z_lag, Z_curr[:, i], rcond=None)
+                    A[i, :] = coef
+                    residuals[:, i] = Z_curr[:, i] - Z_lag @ coef
+                except:
+                    residuals[:, i] = Z_curr[:, i]
+
+        # Companion matrix for lag 1 is just A itself
+        companion = A
+        Sigma = np.cov(residuals, rowvar=False)
+        Sigma += np.eye(N) * 1e-8
+
+        Phi = [np.eye(N)]
+        for h in range(1, H):
+            Phi.append(Phi[-1] @ companion)
+
+        fevd = np.zeros((N, N))
+        for i in range(N):
+            denom = 0
+            for h in range(H):
+                term = Phi[h] @ Sigma @ Phi[h].T
+                denom += term[i, i]
+            denom = max(denom, 1e-10)
+
+            for j in range(N):
+                numer = 0
+                for h in range(H):
+                    e_i = np.zeros(N); e_i[i] = 1
+                    e_j = np.zeros(N); e_j[j] = 1
+                    numer += (e_i @ Phi[h] @ Sigma @ e_j) ** 2 / Sigma[j, j]
+                fevd[i, j] = numer / denom
+
+        # Normalize
+        fevd = np.maximum(fevd, 0)
+        row_sums = fevd.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1e-10
+        fevd = fevd / row_sums
+
+        labels = vol_matrix.columns.tolist()
+        G = nx.DiGraph()
+        for i in range(N):
+            for j in range(N):
+                if i != j and fevd[i, j] > alpha:
+                    G.add_edge(labels[j], labels[i], weight=fevd[i, j])
+
+        spillover = {}
+        in_spillover = {}
+        out_spillover = {}
+        for i in range(N):
+            to_others = fevd[:, i].sum() - fevd[i, i]
+            from_others = fevd[i, :].sum() - fevd[i, i]
+            out_spillover[labels[i]] = to_others
+            in_spillover[labels[i]] = from_others
+            spillover[labels[i]] = to_others - from_others
+
+        edges = [{'source': u, 'target': v, 'weight': d['weight']} for u, v, d in G.edges(data=True)]
+        total_spill = 100 * (fevd.sum() - np.trace(fevd)) / N
+
+        return {
+            'edges': edges,
+            'labels': labels,
+            'n_edges': len(edges),
+            'spillover': spillover,
+            'in_spillover': in_spillover,
+            'out_spillover': out_spillover,
+            'total_spillover_index': total_spill
+        }
+    
+    @staticmethod
+    def return_spillover(return_matrix, H=10, alpha=0.001):
+        import numpy as np
+        import networkx as nx
+        from sklearn.linear_model import LassoCV
+        from sklearn.preprocessing import StandardScaler
+
+        # Drop zero-variance columns
+        return_matrix = return_matrix.loc[:, return_matrix.std(axis=0) > 1e-10]
+        if return_matrix.empty or return_matrix.shape[1] < 2:
+            return {'edges': [], 'labels': [], 'n_edges': 0, 'spillover': {}, 
+                    'in_spillover': {}, 'out_spillover': {}, 'total_spillover_index': 0}
+
+        # Standardize returns
+        Z = StandardScaler().fit_transform(return_matrix.values)
+
+        T, N = Z.shape
+        p = 1  # lag 1
+
+        if T <= p:
+            return {'edges': [], 'labels': [], 'n_edges': 0, 'spillover': {}, 
+                    'in_spillover': {}, 'out_spillover': {}, 'total_spillover_index': 0}
+
+        Z_curr = Z[p:]
+        Z_lag = Z[:-p]
+
+        A = np.zeros((N, N))
+        residuals = np.zeros((T-p, N))
+
+        for i in range(N):
+            try:
+                model = LassoCV(cv=5, fit_intercept=False, max_iter=2000, tol=1e-3, selection='random').fit(Z_lag, Z_curr[:, i])
+                A[i, :] = model.coef_
+                residuals[:, i] = Z_curr[:, i] - Z_lag @ model.coef_
+            except:
+                try:
+                    coef, _, _, _ = np.linalg.lstsq(Z_lag, Z_curr[:, i], rcond=None)
+                    A[i, :] = coef
+                    residuals[:, i] = Z_curr[:, i] - Z_lag @ coef
+                except:
+                    residuals[:, i] = Z_curr[:, i]
+
+        companion = A
+        Sigma = np.cov(residuals, rowvar=False)
+        Sigma += np.eye(N) * 1e-8
+
+        Phi = [np.eye(N)]
+        for h in range(1, H):
+            Phi.append(Phi[-1] @ companion)
+
+        fevd = np.zeros((N, N))
+        for i in range(N):
+            denom = 0
+            for h in range(H):
+                term = Phi[h] @ Sigma @ Phi[h].T
+                denom += term[i, i]
+            denom = max(denom, 1e-10)
+
+            for j in range(N):
+                numer = 0
+                for h in range(H):
+                    e_i = np.zeros(N); e_i[i] = 1
+                    e_j = np.zeros(N); e_j[j] = 1
+                    numer += (e_i @ Phi[h] @ Sigma @ e_j) ** 2 / Sigma[j, j]
+                fevd[i, j] = numer / denom
+
+        # Normalize rows
+        row_sums = fevd.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1e-10
+        fevd = fevd / row_sums
+
+        labels = return_matrix.columns.tolist()
+        G = nx.DiGraph()
+        for i in range(N):
+            for j in range(N):
+                if i != j and fevd[i, j] > alpha:
+                    G.add_edge(labels[j], labels[i], weight=fevd[i, j])
+
+        spillover = {}
+        in_spillover = {}
+        out_spillover = {}
+        for i in range(N):
+            to_others = fevd[:, i].sum() - fevd[i, i]
+            from_others = fevd[i, :].sum() - fevd[i, i]
+            out_spillover[labels[i]] = to_others
+            in_spillover[labels[i]] = from_others
+            spillover[labels[i]] = to_others - from_others
+
+        edges = [{'source': u, 'target': v, 'weight': d['weight']} for u, v, d in G.edges(data=True)]
+        total_spill = 100 * (fevd.sum() - np.trace(fevd)) / N
+
+        return {
+            'edges': edges,
+            'labels': labels,
+            'n_edges': len(edges),
+            'spillover': spillover,
+            'in_spillover': in_spillover,
+            'out_spillover': out_spillover,
+            'total_spillover_index': total_spill
+        }
 
     @staticmethod
     def ica_decompose(data_wide, n_components=5):

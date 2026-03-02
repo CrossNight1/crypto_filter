@@ -9,7 +9,7 @@ import plotly.figure_factory as ff
 from src.data import DataManager
 from ml_engine.analysis.correlation import CorrelationEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
-from src.config import AVAILABLE_INTERVALS
+from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _sanitize(data):
@@ -66,6 +66,14 @@ def multivariate_analysis_ui():
                         max=2000
                     ),
 
+                    ui.input_text(
+                        "n_assets",
+                        "Top Volume",
+                        value="10",
+                        placeholder="e.g. 20",
+                        update_on="blur"
+                    ),
+
                     ui.input_selectize(
                         "corr_symbols",
                         "Select Symbols",
@@ -102,19 +110,19 @@ def multivariate_analysis_ui():
                     ),
 
                     ui.panel_conditional(
-                        "input.decomp_method === 'kfactor' || input.decomp_method === 'ica' || input.decomp_method === 'eigen'",
+                        "input.decomp_method === 'ica' || input.decomp_method === 'eigen'",
                         ui.input_slider(
                             "n_components",
-                            "Components (K)",
+                            "Category Count (K)",
                             value=5,
                             min=1,
-                            max=50,
+                            max=5,
                             step=1
-                        ),
+                        )
                     ),
 
                     ui.panel_conditional(
-                        "input.decomp_method === 'kfactor' || input.decomp_method === 'eigen'",
+                        "input.decomp_method === 'kfactor'",
                         ui.input_select(
                             "k_factor_mode",
                             "Filter Mode",
@@ -134,6 +142,18 @@ def multivariate_analysis_ui():
                         ),
                     ),
 
+                    ui.panel_conditional(
+                        "input.decomp_method === 'mst'",
+                        ui.input_select(
+                            "spillover_type",
+                            "Spillover Type",
+                            choices={
+                                "volatility": "Volatility",
+                                "return": "Return"
+                            }
+                        ),
+                    ),
+
                     ui.input_select("decomp_interval", "Timeframe", choices=[]),
 
                     ui.input_numeric(
@@ -142,6 +162,14 @@ def multivariate_analysis_ui():
                         value=50,
                         min=10,
                         max=2000
+                    ),
+
+                    ui.input_text(
+                        "decomp_n_assets",
+                        "Top Volume",
+                        value="10",
+                        placeholder="e.g. 20",
+                        update_on="blur"
                     ),
 
                     ui.input_selectize(
@@ -162,6 +190,10 @@ def multivariate_analysis_server(input, output, session):
     manager = DataManager()
     correlation_matrix = reactive.Value(pd.DataFrame())
     decomp_result = reactive.Value(None)
+    
+    # Track selected symbols for each tab
+    selected_symbols_corr = reactive.Value(set())
+    selected_symbols_decomp = reactive.Value(set())
 
     # ── Shared inventory updates ──────────────────────────────
 
@@ -174,31 +206,34 @@ def multivariate_analysis_server(input, output, session):
         ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected="1d")
         ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected="1d")
 
-    @reactive.effect
-    def _():
-        interval = input.corr_interval()
-        inventory = manager.get_inventory()
-        if not interval or not inventory:
-            return
-        symbols = sorted([s for s, ints in inventory.items() if interval in ints])
-        ui.update_selectize("corr_symbols", choices=symbols, selected=symbols[:50])
 
     @reactive.effect
     def _():
-        interval = input.decomp_interval()
-        inventory = manager.get_inventory()
-        if not interval or not inventory:
-            return
-        symbols = sorted([s for s, ints in inventory.items() if interval in ints])
-        ui.update_selectize("decomp_symbols", choices=symbols, selected=symbols[:50])
+        # Initialize selections if empty
+        if not selected_symbols_corr.get():
+            syms = manager.fetcher.get_top_volume_symbols(top_n=input.n_assets())
+            selected_symbols_corr.set(set(MANDATORY_CRYPTO).union(syms))
+        
+        if not selected_symbols_decomp.get():
+            syms = manager.fetcher.get_top_volume_symbols(top_n=input.decomp_n_assets())
+            selected_symbols_decomp.set(set(MANDATORY_CRYPTO).union(syms))
 
-    @reactive.Effect
-    def _():
-        # Update slider max based on selected symbols
-        syms = input.decomp_symbols()
-        if syms:
-            curr_max = len(syms)
-            ui.update_slider("n_components", max=curr_max)
+        # React to interval changes but preserve or update selections based on inventory
+        inventory = manager.get_inventory()
+        if not inventory:
+            return
+            
+        corr_int = input.corr_interval()
+        all_syms_corr = sorted([s for s, ints in inventory.items() if corr_int in ints])
+        curr_sel_corr = sorted(list(selected_symbols_corr.get()))
+        # Filter selected symbols to ensure they exist in current interval if needed 
+        # (or just show all choices and let data loader handle missing data)
+        ui.update_selectize("corr_symbols", choices=all_syms_corr, selected=curr_sel_corr)
+        
+        decomp_int = input.decomp_interval()
+        all_syms_decomp = sorted([s for s, ints in inventory.items() if decomp_int in ints])
+        curr_sel_decomp = sorted(list(selected_symbols_decomp.get()))
+        ui.update_selectize("decomp_symbols", choices=all_syms_decomp, selected=curr_sel_decomp)
         
     # ── Helper: load return data ──────────────────────────────
 
@@ -249,9 +284,36 @@ def multivariate_analysis_server(input, output, session):
                 sym, result = future.result()
                 if result is not None:
                     data_map[sym] = result
-                if progress:
                     progress.set(i + 1)
         return data_map
+    @reactive.effect
+    def _():
+        try:
+            val = input.n_assets()
+            if not val: return
+            n_assets = int(val)
+        except ValueError:
+            return
+            
+        interval = input.corr_interval()
+        
+        with ui.Progress(min=0, max=100) as p:
+            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
+            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            selected_symbols_corr.set(set(syms))
+            
+            inventory = manager.get_inventory()
+            sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("corr_symbols", choices=sym_choices, selected=syms)
+
+            if n_assets > 10:
+                p.set(10, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
+                    for i, _ in enumerate(as_completed(futures)):
+                        p.set(10 + int(90 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i]}")
+            p.set(100, message="Sync complete")
 
     # ══════════════════════════════════════════════════════════
     # TAB 1: MATRIX RADAR
@@ -260,16 +322,18 @@ def multivariate_analysis_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_gen_corr)
     def _():
-        symbols = input.corr_symbols()
         interval = input.corr_interval()
         structure = input.dependence_structure()
+        syms = list(input.corr_symbols())
 
-        if not symbols or not interval:
+        if not syms:
+            ui.notification_show("Please select at least one symbol", type="warning")
             return
 
-        with ui.Progress(min=0, max=len(symbols)) as p:
-            p.set(message="Computing matrix...")
-
+        with ui.Progress(min=0, max=100) as p:
+            # 1. Check data availability
+            p.set(10, message="Checking data...", detail=f"Preparing {len(syms)} assets")
+            symbols = syms
             if structure == "Correlation":
                 data_map = _load_return_data(symbols, interval, p)
                 if not data_map: return
@@ -419,6 +483,35 @@ def multivariate_analysis_server(input, output, session):
         )
         return fig
 
+    @reactive.effect
+    def _():
+        try:
+            val = input.decomp_n_assets()
+            if not val: return
+            n_assets = int(val)
+        except ValueError:
+            return
+            
+        interval = input.decomp_interval()
+        
+        with ui.Progress(min=0, max=100) as p:
+            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
+            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            selected_symbols_decomp.set(set(syms))
+            
+            inventory = manager.get_inventory()
+            sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("decomp_symbols", choices=sym_choices, selected=syms)
+
+            if n_assets > 10:
+                p.set(10, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
+                    for i, _ in enumerate(as_completed(futures)):
+                        p.set(10 + int(90 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i]}")
+            p.set(100, message="Sync complete")
+
     # ══════════════════════════════════════════════════════════
     # TAB 2: DECOMPOSITION
     # ══════════════════════════════════════════════════════════
@@ -426,35 +519,29 @@ def multivariate_analysis_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_run_decomp)
     def _():
-        symbols = input.decomp_symbols()
         interval = input.decomp_interval()
         method = input.decomp_method()
         window = input.decomp_window()
+        syms = list(input.decomp_symbols())
 
-        if not symbols or not interval:
+        if not syms:
+            ui.notification_show("Please select at least one symbol", type="warning")
             return
 
-        total = len(symbols) + 3
-        with ui.Progress(min=0, max=total) as p:
-            p.set(0, message="Loading data...")
+        with ui.Progress(min=0, max=100) as p:
+            # 1. Check data availability
+            p.set(10, message="Checking data...", detail=f"Preparing {len(syms)} assets")
+            symbols = syms
             data_map = _load_return_data(symbols, interval, p)
-
-            if not data_map:
-                ui.notification_show("No data loaded", type="error")
-                return
-
-            step = len(symbols)
-            p.set(step, message="Computing correlation matrix...")
             # Build correlation matrix as base for most methods
+
             df_aligned = pd.DataFrame(data_map).dropna()
             
             # Use aligned data for calculations
-            corr = df_aligned.corr(method="pearson") # calculate_matrix does this internally but we need the aligned df
-            # Or assume CorrelationEngine handles it.
-            # Let's stick to CorrelationEngine for the matrix 
             corr = CorrelationEngine.calculate_matrix(data_map, method="pearson", window_size=window)
             corr_clean, _ = CorrelationEngine.filter_blanks(corr)
 
+            step = 20
             step += 1
             p.set(step, message=f"Running {method}...")
 
@@ -473,22 +560,17 @@ def multivariate_analysis_server(input, output, session):
             }
 
             if method == "eigen":
-                k = min(input.n_components(), N)
-                result['data'] = DecompositionEngine.k_factor_decompose(
-                    wide_df, k, mode=input.k_factor_mode()
-                )
-                evals = result['data']['eigenvalues']
-                total = evals.sum()
-                result['data']['explained_ratio'] = evals / total if total > 0 else evals * 0
-                result['data']['cumulative'] = np.cumsum(result['data']['explained_ratio'])
+                k = input.n_components()
+                result['data'] = DecompositionEngine.pca_decompose(wide_df, n_components=k)
+                result['data']['mode'] = "Standard" # For card title compatibility
 
             elif method == "rmt":
                 result['data'] = DecompositionEngine.spectral_filter_rmt(corr_clean, T, N)
 
             elif method == "kfactor":
-                k = min(input.n_components(), N)
+                # k is now ignored by k_factor_decompose in favor of automated PC1 logic
                 result['data'] = DecompositionEngine.k_factor_decompose(
-                    wide_df, k, mode=input.k_factor_mode()
+                    wide_df, 0, mode=input.k_factor_mode()
                 )
 
             elif method == "ica":
@@ -504,12 +586,18 @@ def multivariate_analysis_server(input, output, session):
                 result['dist'] = dist
 
             elif method == "mst":
-                dist = DecompositionEngine.distance_matrix(corr_clean)
-                result['data'] = DecompositionEngine.mst_spillover(dist)
+                # dist = DecompositionEngine.distance_matrix(corr_clean)
+                # result['data'] = DecompositionEngine.mst_spillover(dist)
+                s_type = input.spillover_type()
+                if s_type == "volatility":
+                    vol = df_aligned.ewm(span=window, adjust=False).std().dropna()
+                    result['data'] = DecompositionEngine.vol_spillover(vol)
+                else:
+                    result['data'] = DecompositionEngine.return_spillover(df_aligned)
+                result['spillover_type'] = s_type
 
             result['corr'] = corr_clean
-            step += 1
-            p.set(step, message="Done")
+            p.set(100, message="Done")
             decomp_result.set(result)
 
     @render.ui
@@ -523,12 +611,12 @@ def multivariate_analysis_server(input, output, session):
 
         if method == "eigen":
             cards.append(ui.card(
-                ui.card_header("Eigenvalue Spectrum & Explained Variance"),
+                ui.card_header("Market-Neutral PCA: Spectrum (PC1 = Market Factor)"),
                 output_widget("decomp_chart_1"),
                 full_screen=True
             ))
             cards.append(ui.card(
-                ui.card_header(f"Reconstructed Correlation Matrix ({res['data']['mode']} {res['data']['k']} factors)"),
+                ui.card_header(f"Market-Neutral Correlation ({res['data']['k']} factors after Market)"),
                 output_widget("decomp_chart_2"),
                 full_screen=True
             ))
@@ -547,14 +635,14 @@ def multivariate_analysis_server(input, output, session):
             ))
 
         elif method == "kfactor":
-            d = res['data']
+            mode_lbl = "Systematic (PC1)" if res['data']['mode'] == 'top' else "Idiosyncratic (PC2+)"
             cards.append(ui.card(
-                ui.card_header(f"K={d['k']} Factor Loadings — {d['variance_captured']:.1%} variance captured"),
+                ui.card_header(f"K-Factor Spectrum: {mode_lbl}"),
                 output_widget("decomp_chart_1"),
                 full_screen=True
             ))
             cards.append(ui.card(
-                ui.card_header("Reconstructed Matrix"),
+                ui.card_header(f"Reconstructed Correlation Matrix ({mode_lbl})"),
                 output_widget("decomp_chart_2"),
                 full_screen=True
             ))
@@ -592,13 +680,14 @@ def multivariate_analysis_server(input, output, session):
             ))
 
         elif method == "mst":
+            s_type = res.get('spillover_type', 'volatility').capitalize()
             cards.append(ui.card(
-                ui.card_header(f"Spill Over Network — {res['data']['n_edges']} edges"),
+                ui.card_header(f"{s_type} Spillover Network — {res['data'].get('n_edges', 0)} edges (Total Spillover Index: {res['data'].get('total_spillover_index', 0):.1f}%)"),
                 output_widget("decomp_chart_1"),
                 full_screen=True
             ))
             cards.append(ui.card(
-                ui.card_header("Spillover Centrality"),
+                ui.card_header(f"{s_type} Spillover Centrality (Out vs In)"),
                 output_widget("decomp_chart_2"),
                 full_screen=True
             ))
@@ -653,21 +742,27 @@ def multivariate_analysis_server(input, output, session):
         method = res['method']
         d = res['data']
 
-        # ── PCA Eigenvalue Spectrum ───────────────────────
-        if method == "eigen":
+        # ── PCA/K-Factor Eigenvalue Spectrum ──────────────
+        if method == "eigen" or method == "kfactor":
             n = len(d['eigenvalues'])
             k = d.get('k', n)
             mode = d.get('mode', 'top')
             
             # Determine bar colors based on selection
             colors = ["rgba(100,100,100,0.4)"] * n
-            if mode == 'top':
+            if method == 'eigen':
+                # PC1 is Market Factor
+                if n > 0:
+                    colors[0] = "rgba(100,200,255,0.8)" # Light blue for market
+                # PC2..PC(K+1) are selected systematic components
+                for i in range(1, min(k+1, n)):
+                    colors[i] = "rgba(255,165,0,0.9)"  # Orange
+            elif mode == 'top':
                 for i in range(min(k, n)):
-                    colors[i] = "rgba(255,165,0,0.9)"  # Orange for Systematic
+                    colors[i] = "rgba(255,165,0,0.9)"
             else:
-                # Bottom mode: Keep last k components
                 for i in range(max(0, n-k), n):
-                    colors[i] = "rgba(0,255,150,0.9)"  # Green for Idiosyncratic
+                    colors[i] = "rgba(0,255,150,0.9)"
 
             fig = make_subplots(specs=[[{"secondary_y": True}]])
             fig.add_trace(go.Bar(
@@ -712,15 +807,9 @@ def multivariate_analysis_server(input, output, session):
             fig.update_yaxes(title_text="Eigenvalue")
             return _dark_layout(fig, height=450)
 
-        # ── K-Factor Loadings Heatmap ─────────────────────
-        elif method == "kfactor":
-            loadings = _sanitize(d['loadings'])
-            fig = px.imshow(
-                loadings, text_auto=".2f", aspect="auto",
-                color_continuous_scale="Spectral_r",
-                template="plotly_dark"
-            )
-            return _dark_layout(fig, height=500, width=1470)
+        # ── K-Factor Loadings Heatmap (Removed, using spectrum) ──
+        elif method == "none": # Placeholder to skip
+            pass
 
         # ── ICA Mixing Matrix ─────────────────────────────
         elif method == "ica":
@@ -759,7 +848,7 @@ def multivariate_analysis_server(input, output, session):
                 distfun=lambda x: x,
                 linkagefun=lambda x: linkage(squareform(x, checks=False), method=input.linkage_method()),
                 orientation='bottom',
-                color_threshold=dist_matrix.max() * 0.7  # adjust to separate clusters
+                color_threshold=dist_matrix.max()
             )
 
             # Beautify lines
@@ -783,7 +872,7 @@ def multivariate_analysis_server(input, output, session):
                     mirror=True
                 ),
                 showlegend=False,
-                margin=dict(l=40, r=40, t=40, b=150)
+                margin=dict(l=50, r=50, t=50, b=100)
             )
             fig.update_xaxes(gridcolor="rgba(255,255,255,0.2)", linecolor="white", tickcolor="white", zerolinecolor="white")
             fig.update_yaxes(gridcolor="rgba(255,255,255,0.2)", linecolor="white", tickcolor="white", zerolinecolor="white")
@@ -799,67 +888,118 @@ def multivariate_analysis_server(input, output, session):
             n = len(labels)
             label_idx = {l: i for i, l in enumerate(labels)}
 
-            # Simple circular layout
-            angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
-            pos = {l: (np.cos(a), np.sin(a)) for l, a in zip(labels, angles)}
+            import networkx as nx
 
-            # Force-directed refinement (simple spring)
-            positions = np.column_stack([np.cos(angles), np.sin(angles)])
-            for _ in range(len(labels)):
-                for edge in edges:
-                    i, j = label_idx[edge['source']], label_idx[edge['target']]
-                    diff = positions[j] - positions[i]
-                    dist = np.linalg.norm(diff) + 1e-9
-                    target_dist = edge['weight']
-                    force = (dist - target_dist) * 0.01
-                    positions[i] += force * diff / dist
-                    positions[j] -= force * diff / dist
+            # Build nx Graph for layout calculation
+            G_layout = nx.Graph()
+            G_layout.add_nodes_from(labels)
+            for edge in edges:
+                # Use inverse weight for distance if possible, or just connectivity
+                G_layout.add_edge(edge['source'], edge['target'], weight=edge['weight'])
 
-            pos = {l: (positions[i, 0], positions[i, 1]) for i, l in enumerate(labels)}
+            # pos = nx.spring_layout(G_layout, k=1/np.sqrt(len(labels)), iterations=100, seed=42)
+            pos = nx.spring_layout(G_layout, k=len(labels), iterations=100, seed=42)
 
             fig = go.Figure()
 
             # Draw edges
+            if edges:
+                max_w = max(e['weight'] for e in edges)
+                min_w = min(e['weight'] for e in edges)
+                range_w = max_w - min_w if max_w > min_w else 1.0
+            else:
+                max_w = min_w = 0
+
+            annotations = []
             for edge in edges:
                 x0, y0 = pos[edge['source']]
                 x1, y1 = pos[edge['target']]
+                
+                # Scale width between 1.0 and 2.0
+                norm_w = (edge['weight'] - min_w) / range_w
+                width = 1.0 + 1.0 * norm_w
+                
                 fig.add_trace(go.Scatter(
                     x=[x0, x1, None], y=[y0, y1, None],
                     mode="lines",
-                    line=dict(width=1.5, color="rgba(255,165,0,0.5)"),
-                        hoverinfo="none",
+                    line=dict(width=width, color="rgba(255,165,0,0.4)"),
+                    hoverinfo="skip",
                     showlegend=False
+                ))
+
+                # Add directional arrow via annotation
+                # We offset slightly so the arrowhead isn't buried in the node
+                # The arrow points from source to target (directed spillover)
+                annotations.append(dict(
+                    ax=x0, ay=y0, axref='x', ayref='y',
+                    x=x1, y=y1, xref='x', yref='y',
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowsize=1.5,
+                    arrowwidth=width,
+                    arrowcolor="rgba(255,165,0,0.8)",
+                    standoff=15, # offset from the target node center
+                    startstandoff=10 # offset from source node
                 ))
 
             # Draw nodes
             node_x = [pos[l][0] for l in labels]
             node_y = [pos[l][1] for l in labels]
 
-            # Color by spillover
+            # Color and size by spillover influence
             spillover = d.get('spillover', {})
+            in_spill = d.get('in_spillover', {})
+            out_spill = d.get('out_spillover', {})
             colors = [spillover.get(l, 0) for l in labels]
+            
+            # Scale node size based on net influence magnitude
+            spill_vals = np.array(list(spillover.values()))
+            if len(spill_vals) > 0:
+                abs_spill = np.abs(spill_vals)
+                s_min, s_max = abs_spill.min(), abs_spill.max()
+                s_range = s_max - s_min if s_max > s_min else 1.0
+                # node_sizes = [10 + 20 * (abs(spillover.get(l, 0)) - s_min) / s_range for l in labels]
+                raw_sizes = np.array([10 + 10 ** (1 + spillover.get(l, 0)) for l in labels])
+
+                # Min-max normalize to [0,1]
+                s_min, s_max = raw_sizes.min(), raw_sizes.max()
+                s_range = s_max - s_min if s_max > s_min else 1.0
+                node_sizes = (raw_sizes - s_min) / s_range
+                node_sizes = node_sizes * 20 + 10
+
+            else:
+                node_sizes = [10] * len(labels)
+
+            h_texts = [
+                f"{l}<br>"
+                f"Net: {spillover.get(l, 0):.2f}<br>"
+                f"Out (Transmitted): {out_spill.get(l, 0):.2f}<br>"
+                f"In (Received): {in_spill.get(l, 0):.2f}"
+                for l in labels
+            ]
 
             fig.add_trace(go.Scatter(
                 x=node_x, y=node_y,
                 mode="markers+text",
                 marker=dict(
-                    size=18, color=colors,
+                    size=node_sizes, color=colors,
                     colorscale="Spectral_r",
                     line=dict(width=1, color="white"),
                     showscale=True,
-                    colorbar=dict(title="Spillover")
+                    colorbar=dict(title="Net Spillover")
                     ),
                 text=labels,
                 textposition="top center",
-                textfont=dict(size=9, color="white"),
-                hovertext=[f"{l} (spillover: {spillover.get(l, 0):.2f})" for l in labels],
+                textfont=dict(size=10, color="white"),
+                hovertext=h_texts,
                 hoverinfo="text",
                 showlegend=False
                 ))
 
             fig.update_layout(
                 xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                annotations=annotations
             )
             return _dark_layout(fig, height=600)
 
@@ -909,11 +1049,14 @@ def multivariate_analysis_server(input, output, session):
 
         # ── Clustered Correlation Heatmap ─────────────────
         elif method == "cluster":
+            from scipy.cluster.hierarchy import leaves_list
             corr = res['corr']
-            cluster_labels = d['cluster_labels']
+            d = res['data']
+            Z = d['linkage_matrix']
             labels = d['labels']            
 
-            order = np.argsort(cluster_labels)
+            # Use leaves_list to match dendrogram order
+            order = leaves_list(Z)
             sorted_labels = [labels[i] for i in order]
             sorted_corr = corr.loc[sorted_labels, sorted_labels]
 
@@ -926,23 +1069,66 @@ def multivariate_analysis_server(input, output, session):
             return _dark_layout(fig, height=500, width=1470)
 
 
-        # ── MST Spillover Bar Chart ───────────────────────
+        # ── MST Spillover Scatter (Out vs In) ──────────────
         if method == "mst":
-            spill = d.get('spillover', {})
-            # Sort by spillover
-            sorted_spill = sorted(spill.items(), key=lambda x: x[1], reverse=True)
-            labels = [x[0] for x in sorted_spill]
-            vals = [x[1] for x in sorted_spill]
+            in_spill = d.get('in_spillover', {})
+            out_spill = d.get('out_spillover', {})
+            labels = d.get('labels', [])
             
+            x_vals = [out_spill.get(l, 0) for l in labels]
+            y_vals = [in_spill.get(l, 0) for l in labels]
+            nets = [out_spill.get(l, 0) - in_spill.get(l, 0) for l in labels]
+            
+            # Replicate node size logic from chart 1 for consistency
+            spill_vals = np.array(nets)
+            if len(spill_vals) > 0:
+                raw_sizes = np.array([10 + 10 ** (1 + (out_spill.get(l, 0) - in_spill.get(l, 0))) for l in labels])
+                s_min, s_max = raw_sizes.min(), raw_sizes.max()
+                s_range = s_max - s_min if s_max > s_min else 1.0
+                node_sizes = (raw_sizes - s_min) / s_range
+                node_sizes = node_sizes * 20 + 10
+            else:
+                node_sizes = [15] * len(labels)
+
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=labels,
-                y=vals,
-                name="Spillover Centrality",
-                marker_color="rgba(100,200,250,0.8)"
+            
+            # Diagonal line where Net = 0
+            all_max = max(max(x_vals), max(y_vals)) if labels else 1.0
+            fig.add_trace(go.Scatter(
+                x=[0, all_max * 1.1], y=[0, all_max * 1.1],
+                mode='lines',
+                line=dict(color='rgba(255,255,255,0.2)', dash='dash'),
+                name='Net Zero Drivers Line',
+                hoverinfo='skip'
             ))
-            fig.update_xaxes(title_text="Asset")
-            fig.update_yaxes(title_text="Spillover (Inverse Path Length)")
+            
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y_vals,
+                mode='markers+text',
+                marker=dict(
+                    size=node_sizes,
+                    color=nets,
+                    colorscale="Spectral_r",
+                    line=dict(width=1, color="white"),
+                    showscale=True,
+                    colorbar=dict(title="Net Spillover")
+                ),
+                text=labels,
+                textposition="top center",
+                hovertext=[
+                    f"<b>{l}</b><br>Out (Transmitted): {out_spill.get(l, 0):.4f}<br>In (Received): {in_spill.get(l, 0):.4f}<br>Net Influence: {out_spill.get(l, 0) - in_spill.get(l, 0):.4f}"
+                    for l in labels
+                ],
+                hoverinfo="text"
+            ))
+            
+            fig.update_layout(
+                xaxis_title="Out (Transmitted)",
+                yaxis_title="In (Received)",
+                showlegend=False,
+                margin=dict(l=50, r=50, t=50, b=50),
+                template="plotly_dark"
+            )
             return _dark_layout(fig, height=500, width=1470)
 
         return go.Figure()

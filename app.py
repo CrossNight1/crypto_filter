@@ -114,7 +114,7 @@ app_ui = ui.page_navbar(
 
 def server(input, output, session):
     # Shared global state if needed
-    global_interval = reactive.Value("1d")
+    global_interval = reactive.Value("1h")
     manager = DataManager()
     engine = MetricsEngine()
     

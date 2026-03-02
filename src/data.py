@@ -65,7 +65,7 @@ class BinanceFuturesFetcher:
             sym = row['symbol']
             if sym.endswith('USDT') and sym not in exclude:
                 top_symbols.append(sym)
-                if len(top_symbols) >= top_n:
+                if len(top_symbols) >= int(top_n):
                     break
         return top_symbols
 

@@ -7,9 +7,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS, AVAILABLE_INTERVALS
+from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO
 from src.logger import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from scipy import stats
 
 def market_radar_ui():
     return ui.navset_card_underline(
@@ -23,8 +24,20 @@ def market_radar_ui():
                         "btn_calc_snapshot",
                         "Load Data",
                         class_="btn-primary w-100 mb-2"
+                    ),                 
+                    ui.input_text(
+                        "focus_symbol",
+                        "Focus Symbol",
+                        value="",
+                        placeholder="e.g. BTCUSDT"
                     ),
-
+                    ui.input_selectize(
+                        "exclude_symbols",
+                        "Exclude Symbols",
+                        choices=[],
+                        selected=[],
+                        multiple=True
+                    ),
                     ui.input_select(
                         "radar_interval",
                         "Interval",
@@ -61,8 +74,7 @@ def market_radar_ui():
                     ui.input_select(
                         "z_axis",
                         "Z Axis",
-                        choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}},
-                        selected=ALL_METRICS[1]
+                        choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}}
                     ),
 
                     # ----- LOG SCALE (single row) -----
@@ -74,23 +86,15 @@ def market_radar_ui():
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
-                    ui.input_text(
-                        "focus_symbol",
-                        "Focus Symbol",
-                        value="",
-                        placeholder="e.g. BTCUSDT"
-                    ),
                     ui.input_switch(
                         "drop_zeros",
                         "Exclude Zero Metrics",
                         value=True
                     ),
-                    ui.input_selectize(
-                        "exclude_symbols",
-                        "Exclude Symbols",
-                        choices=[],
-                        selected=[],
-                        multiple=True
+                    ui.input_switch(
+                        "show_regression",
+                        "Show Regression Line",
+                        value=True
                     )
                 ),
                 ui.div(
@@ -188,6 +192,7 @@ def market_radar_ui():
                         "rpg_symbols",
                         "Compare Symbols",
                         choices=[],
+                        selected=MANDATORY_CRYPTO,
                         multiple=True
                     )
                 ),
@@ -269,9 +274,8 @@ def market_radar_server(input, output, session, global_interval):
                     b_close = pd.to_numeric(benchmark_df['close'], errors='coerce').ffill().fillna(0)
                     benchmark_returns = b_close.pct_change().dropna()
                 
-                # Pulse reactive inputs once here to avoid "No current reactive context" in threads
+                # Pulse reactive inputs once here
                 filter_window = input.filter_window()
-                exclude_list = list(input.exclude_symbols())
 
                 def process_symbol(sym):
                     try:
@@ -290,13 +294,10 @@ def market_radar_server(input, output, session, global_interval):
                     return None
 
                 results = []
-                # Use a reasonable number of workers (e.g., 10-20 for I/O bound tasks like loading data)
+                # Use a reasonable number of workers
                 with ThreadPoolExecutor(max_workers=50) as executor:
-                    # Filter out excluded symbols before submitting
-                    active_symbols = [s for s in symbols if s not in exclude_list]
-                    
-                    # Submit all tasks
-                    future_to_sym = {executor.submit(process_symbol, sym): sym for sym in active_symbols}
+                    # Submit all tasks (Excluding nothing during calculation for realtime filtering)
+                    future_to_sym = {executor.submit(process_symbol, sym): sym for sym in symbols}
                     
                     # Process as they complete to update progress bar
                     for i, future in enumerate(as_completed(future_to_sym)):
@@ -335,7 +336,15 @@ def market_radar_server(input, output, session, global_interval):
     
     @render.data_frame
     def snapshot_table():
-        return snapshot_data.get()
+        df = snapshot_data.get()
+        if df.empty:
+            return df
+        
+        exclude_list = list(input.exclude_symbols())
+        if exclude_list:
+            df = df[~df['symbol'].isin(exclude_list)]
+            
+        return df
 
     @render_widget
     def snapshot_chart():
@@ -344,6 +353,11 @@ def market_radar_server(input, output, session, global_interval):
 
         # Work on a copy to avoid side effects
         plot_df = df.copy()
+
+        # Apply Exclude Symbols filter reactively
+        exclude_list = list(input.exclude_symbols())
+        if exclude_list:
+            plot_df = plot_df[~plot_df['symbol'].isin(exclude_list)]
 
         if input.drop_zeros():
             plot_df = plot_df[plot_df['volatility'] > 1e-9]
@@ -381,19 +395,30 @@ def market_radar_server(input, output, session, global_interval):
                 template="plotly_dark",
                 custom_data=['symbol']  # Add symbol to custom data for click events
             )
+            fig.update_traces(marker=dict(color='#00F5FF'))
             
         fig.update_layout(
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin=dict(l=50, r=50, t=50, b=50),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.12,
+                xanchor="center",
+                x=0.5
+            ),
             xaxis_title=METRIC_LABELS.get(x, x),
             yaxis_title=METRIC_LABELS.get(y, y),
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
+            height=600,
+            width=1490,
             font=dict(family="Space Mono", color="white"),
             xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
             yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
             clickmode='event+select'  # Enable click events
         )
-        
+                               
         focus_sym = input.focus_symbol().strip().upper()
         selected_points = None
         unselected_opacity = 0.2
@@ -441,6 +466,37 @@ def market_radar_server(input, output, session, global_interval):
 
         fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
         fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+
+        # --- Regression Line ---
+        if input.show_regression() and len(plot_df) > 1:
+            try:
+                # Calculate regression on linear data
+                reg_x = plot_df[x].values
+                reg_y = plot_df[y].values
+                
+                # Filter out NaNs or Infs
+                mask = np.isfinite(reg_x) & np.isfinite(reg_y)
+                reg_x, reg_y = reg_x[mask], reg_y[mask]
+                
+                if len(reg_x) > 1:
+                    slope, intercept, r_value, p_value, std_err = stats.linregress(reg_x, reg_y)
+                    
+                    # Generate line points
+                    x_range = np.linspace(reg_x.min(), reg_x.max(), 100)
+                    y_range = intercept + slope * x_range
+                    
+                    fig.add_trace(go.Scatter(
+                        x=x_range,
+                        y=y_range,
+                        mode='lines',
+                        name=f'Fit (R²={r_value**2:.3f} | intercept={intercept:.3f} | slope={slope:.3f})',
+                        line=dict(color='orange', width=2, dash='dash'),
+                        hoverinfo='skip'
+                    ))
+
+            except Exception as e:
+                logger.log("Market Radar", "ERROR", f"Regression error: {e}")
+
         return fig
     
     @reactive.effect
@@ -560,7 +616,7 @@ def market_radar_server(input, output, session, global_interval):
         interval = input.rpg_interval()
         inventory = manager.get_inventory()
         available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
-        ui.update_selectize("rpg_symbols", choices=available_syms, selected=available_syms[:5])
+        ui.update_selectize("rpg_symbols", choices=available_syms, selected=MANDATORY_CRYPTO)
 
     @reactive.effect
     @reactive.event(input.btn_gen_rpg)
@@ -639,12 +695,22 @@ def market_radar_server(input, output, session, global_interval):
             template="plotly_dark", line_shape='spline'
         )
         # Add markers for status
+        # First, build a color map from the line traces
+        symbol_colors = {}
+        for trace in fig.data:
+            if isinstance(trace, go.Scatter) and trace.name in df['Symbol'].unique():
+                symbol_colors[trace.name] = trace.line.color
+
         for sym in df['Symbol'].unique():
             sym_df = df[df['Symbol'] == sym]
             fig.add_trace(go.Scatter(
                 x=sym_df['X_Value'], y=sym_df['Y_Value'],
                 mode='markers',
-                marker=dict(size=sym_df['Marker_Size'], opacity=sym_df['Order']),
+                marker=dict(
+                    size=sym_df['Marker_Size'], 
+                    opacity=sym_df['Order'],
+                    color=symbol_colors.get(sym) # Match line color
+                ),
                 name=sym, showlegend=False
             ))
         
@@ -660,8 +726,8 @@ def market_radar_server(input, output, session, global_interval):
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
             font=dict(family="Space Mono", color="white"),
-            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
-            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)")
+            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)"),
+            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
         )
         return fig
 
