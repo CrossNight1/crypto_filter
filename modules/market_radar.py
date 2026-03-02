@@ -250,17 +250,38 @@ def market_radar_server(input, output, session, global_interval):
     logger.log("Market Radar", "INFO", "Server initialized")
 
     @reactive.effect
+    @reactive.event(input.btn_calc_snapshot)
     def _initialize_symbols():
-        # Initial population of symbols based on top volume if empty
+        # Only initialize with mandatory if we don't have symbols yet
         if not selected_symbols_radar.get():
-            try:
-                n = int(input.n_assets_radar() or 20)
-                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
-                selected_symbols_radar.set(set(MANDATORY_CRYPTO).union(syms))
-            except:
-                selected_symbols_radar.set(set(MANDATORY_CRYPTO))
+            selected_symbols_radar.set(set(MANDATORY_CRYPTO))
 
     @reactive.effect
+    @reactive.event(input.n_assets_radar)
+    def _update_radar_symbols_list():
+        try:
+            n = int(input.n_assets_radar() or 20)
+            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            new_syms = set(MANDATORY_CRYPTO).union(syms)
+            selected_symbols_radar.set(new_syms)
+            
+            interval = input.radar_interval()
+            inventory = manager.get_inventory()
+            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("radar_symbols", choices=all_syms, selected=sorted(list(new_syms)))
+        except:
+            pass
+
+    @reactive.effect
+    def _populate_radar_on_tab():
+        try:
+            if input.main_nav() == "MARKET_RADAR":
+                _update_radar_symbols_list()
+        except:
+            pass
+
+    @reactive.effect
+    @reactive.event(input.radar_interval, ignore_init=True)
     def _update_symbol_choices():
         interval = input.radar_interval()
         inventory = manager.get_inventory()
@@ -273,30 +294,33 @@ def market_radar_server(input, output, session, global_interval):
         ui.update_selectize("radar_symbols", choices=available_syms, selected=curr_sel)
 
     @reactive.effect
-    @reactive.event(input.n_assets_radar)
-    def _handle_top_volume():
+    @reactive.event(input.btn_calc_snapshot)
+    def _handle_top_volume_and_sync():
+        # Strictly gate both symbol population and data syncing behind the button
         try:
             val = input.n_assets_radar()
-            if not val: return
-            n_assets = int(val)
+            n_assets = int(val) if val else 20
         except ValueError:
-            return
+            n_assets = 20
             
         interval = input.radar_interval()
         
         with ui.Progress(min=0, max=100) as p:
+            # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
             new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
             syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
             selected_symbols_radar.set(set(syms))
             
+            # 2. Update UI
             inventory = manager.get_inventory()
             sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
             ui.update_selectize("radar_symbols", choices=sym_choices, selected=syms)
             
-            # Sync data for these symbols
-            p.set(20, message="Syncing data...")
-            # Optional: Add background sync here if needed, similar to multivariate
+            # 3. Sync data for these symbols (if needed/optional)
+            p.set(20, message="Syncing data...", detail="Ensuring cache is up-to-date")
+            # In Market Radar, we typically load on-demand during calculation, 
+            # but we can do a quick check here if desired.
             
             p.set(100, message="Sync complete")
 
@@ -692,11 +716,13 @@ def market_radar_server(input, output, session, global_interval):
         return ui.HTML(metrics_html)
 
     @reactive.effect
-    def _():
+    @reactive.event(input.rpg_interval, ignore_init=True)
+    def _update_rpg_symbols():
+        # This only updates the UI choices, doesn't fetch data
         interval = input.rpg_interval()
         inventory = manager.get_inventory()
         available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
-        ui.update_selectize("rpg_symbols", choices=available_syms, selected=MANDATORY_CRYPTO)
+        ui.update_selectize("rpg_symbols", choices=available_syms, selected=MANDATORY_CRYPTO, server=True)
 
     @reactive.effect
     @reactive.event(input.btn_gen_rpg)

@@ -65,13 +65,13 @@ class ModelFactory:
         Returns:
             Model instance.
         """
-        if model_type == 'Random Forest Regressor':
+        if model_type == 'RF Regressor':
             return RandomForestRegressor(
                 n_estimators=kwargs.get('n_estimators', 100),
                 max_depth=kwargs.get('max_depth', None),
                 random_state=kwargs.get('random_state', 42)
             )
-        elif model_type == 'Random Forest Classifier':
+        elif model_type == 'RF Classifier':
             return RandomForestClassifier(
                 n_estimators=kwargs.get('n_estimators', 100),
                 max_depth=kwargs.get('max_depth', None),

@@ -264,6 +264,10 @@ class DataManager:
 
     def _sync_data(self, symbol: str, interval: str):
         """Automatically fetch and append missing data up to the current time."""
+        if not interval or interval == 'None':
+            # Skip if interval is missing or a string 'None'
+            return
+
         cache_key = f"{symbol}_{interval}"
         now = time.time()
         

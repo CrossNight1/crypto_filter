@@ -36,8 +36,8 @@ from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, ca
 
 def meta_sizing_cal(meta_probs):
     """Calibrate meta probabilities to sizing"""
-    return np.clip(2 * meta_probs - 1, 0, 1)
-    # return np.where(meta_probs > 0.5, meta_probs, 0)
+    # return np.clip(2 * meta_probs - 1, 0, 1)
+    return np.where(meta_probs > 0.5, 1, 0)
 
 def recursive_unwrap(model):
     """Recursively peel off model wrappers to find the base model for SHAP."""
@@ -95,7 +95,6 @@ def predictive_ui():
         ui.sidebar(
             ui.h4("Predictive Analysis"),
             ui.input_action_button("btn_run_analysis", "Run Analysis", class_="btn-primary w-100 mt-3"),
-            ui.input_select("analysis_goal", "Analysis Goal", ["Directional", "Return Value"]),
             ui.input_select(
                 "trade_direction", "Direction", 
                 choices=["Both Sides", "Long Only", "Short Only"], 
@@ -108,15 +107,10 @@ def predictive_ui():
             ui.accordion(
                 ui.accordion_panel(
                     "Model Parameters",
-
+                    
                     ui.panel_conditional(
-                        "typeof input.reg_type !== 'undefined' && (input.reg_type.includes('Random Forest') || input.reg_type.includes('XGB'))",
+                        "typeof input.reg_type !== 'undefined' && (input.reg_type.includes('RF') || input.reg_type.includes('XGB'))",
                         ui.input_slider("rf_max_depth", "Max Depth", min=2, max=50, value=5)
-                    ),
-
-                    ui.panel_conditional(
-                        "input.analysis_goal == 'Return Value'",
-                        ui.input_numeric("fwd_window", "Prediction Window", value=10, min=1, max=200)
                     ),
 
                     ui.input_slider("test_size", "Test Set Ratio (%)", min=0, max=50, value=20, step=5),
@@ -390,7 +384,7 @@ def predictive_server(input, output, session):
     @reactive.event(input.main_navset)
     def auto_run_engineering():
         if input.main_navset() == "Data Engineering":
-            ticker = input.selected_ticker() if input.analysis_goal() == "Directional" else (list(input.selected_tickers())[0] if input.selected_tickers() else None)
+            ticker = input.selected_ticker()
             interval = input.interval()
             cache = engineered_data.get()
             
@@ -430,8 +424,8 @@ def predictive_server(input, output, session):
     async def auto_calibrate_thresholds():
         """Auto-calibrate Volume and Dollar thresholds to minimize normality loss"""
         # Get current ticker and interval
-        goal = input.analysis_goal()
-        ticker = input.selected_ticker() if goal == "Directional" else (list(input.selected_tickers())[0] if input.selected_tickers() else None)
+        # Directional Analysis
+        ticker = input.selected_ticker()
         
         if not ticker:
             ui.notification_show("Please select a ticker first.", type="warning")
@@ -474,15 +468,10 @@ def predictive_server(input, output, session):
     @reactive.event(eng_trigger)
     def engineering_result():
         # Get Current Symbol and Interval context
-        goal = input.analysis_goal()
-        if goal == "Directional":
-            ticker = input.selected_ticker()
-        else:
-            ts = list(input.selected_tickers())
-            if not ts: return None
-            ticker = ts[0]
-            
+        # Determine ticker
+        ticker = input.selected_ticker()
         interval = input.interval()
+        if not ticker or not interval: return None
         df = manager.load_data(ticker, interval)
         if df is None or df.empty: return None
         
@@ -732,10 +721,7 @@ def predictive_server(input, output, session):
         else:
             tickers = sorted(list(inv.keys()))
         
-        if input.analysis_goal() == "Directional":
-            return ui.input_select("selected_ticker", "Symbol", choices=tickers, selected='BTCUSDT')
-        else:
-            return ui.input_selectize("selected_tickers", "Symbols", choices=tickers, selected='BTCUSDT', multiple=True)
+        return ui.input_select("selected_ticker", "Symbol", choices=tickers, selected='BTCUSDT')
 
     @reactive.effect
     def _():
@@ -746,10 +732,7 @@ def predictive_server(input, output, session):
 
     @render.ui
     def model_select_ui():
-        if input.analysis_goal() == "Directional":
-            return ui.input_select("reg_type", "Model", choices=["Random Forest Classifier", "XGB Classifier"])
-        else:
-            return ui.input_select("reg_type", "Model", choices=["Linear (OLS)", "Random Forest Regressor", "XGB Regressor"])
+        return ui.input_select("reg_type", "Model", choices=["RF Classifier", "XGB Classifier"])
 
 
     @reactive.effect
@@ -765,14 +748,9 @@ def predictive_server(input, output, session):
         
         try:
             logger.log("Predictive", "INFO", "Step 0: Reading UI inputs")
-            goal = input.analysis_goal()
-            is_classification = (goal == "Directional")
-            
+            is_classification = True
             # Read dynamic ticker selection
-            if is_classification:
-                tickers = [input.selected_ticker()]
-            else:
-                tickers = list(input.selected_tickers())
+            tickers = [input.selected_ticker()]
                 
             if not tickers:
                 ui.notification_show("Select at least one ticker", type="error")
@@ -788,10 +766,10 @@ def predictive_server(input, output, session):
             reg_type = input.reg_type()
             test_ratio = input.test_size() / 100.0
             
-            rf_max_depth = input.rf_max_depth() if ("Random Forest" in reg_type or "XGB" in reg_type) else None
+            rf_max_depth = input.rf_max_depth() if ("RF" in reg_type or "XGB" in reg_type) else None
             interval = input.interval()
             ind_window = input.eng_lookback()
-            fwd_window = 1 if is_classification else input.fwd_window()
+            fwd_window = 1
             min_samples = input.eng_min_samples()
             standardize_flag = input.standardize()
 
@@ -808,22 +786,21 @@ def predictive_server(input, output, session):
                 
                 # Labeler params from UI
                 l_params = None
-                if is_classification:
-                    l_type = input.labeler_type()
-                    if l_type == "Trend": 
-                        l_params = {'type': "Trend", 'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive()}
-                    elif l_type == "BoxRange": 
-                        l_params = {'type': "BoxRange", 'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()}
-                    elif l_type == "Combine":
-                        l_params = {
-                            'type': "Combine", 
-                            'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive(),
-                            'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()
-                        }
-                    elif l_type == "Regime": 
-                        l_params = {'type': "Regime", 'window': input.stat_window(), 'vote_th': input.vote_th()}
-                    else:
-                        l_params = {'type': "TailSet", 'window': input.tail_window(), 'threshold': input.tail_threshold()}
+                l_type = input.labeler_type()
+                if l_type == "Trend": 
+                    l_params = {'type': "Trend", 'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive()}
+                elif l_type == "BoxRange": 
+                    l_params = {'type': "BoxRange", 'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()}
+                elif l_type == "Combine":
+                    l_params = {
+                        'type': "Combine", 
+                        'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive(),
+                        'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()
+                    }
+                elif l_type == "Regime": 
+                    l_params = {'type': "Regime", 'window': input.stat_window(), 'vote_th': input.vote_th()}
+                else:
+                    l_params = {'type': "TailSet", 'window': input.tail_window(), 'threshold': input.tail_threshold()}
 
                 for i, sym in enumerate(tickers):
                     df = None
@@ -849,11 +826,7 @@ def predictive_server(input, output, session):
                             feats_data = {feat: engine.calculate_rolling_metric(df, feat, window=ind_window, interval=interval) for feat in x_features}
                             
                             # Check label cache first
-                            cache_key = None
-                            if is_classification:
-                                cache_key = f"{sym}_{interval}_{b_type}_{l_params['type']}"
-                            else:
-                                cache_key = f"{sym}_{interval}_{b_type}_regression_{fwd_window}"
+                            cache_key = f"{sym}_{interval}_{b_type}_{l_params['type']}"
                             
                             label_cache = labeled_data.get()
                             if cache_key in label_cache:
@@ -861,42 +834,39 @@ def predictive_server(input, output, session):
                                 y_series = label_cache[cache_key]['y']
                             else:
                                 print(f"⚠ No cached labels found for {sym}, calculating new labels...")
-                                if is_classification:
-                                    prices = df['close']
-                                    if l_params['type'] == "Trend":
-                                        lobj = Labeler(amplitude_threshold=l_params['amp_th'], max_inactive_period=l_params['max_inactive'])
-                                        y_series = lobj.label(prices)['label']
-                                    elif l_params['type'] == "BoxRange":
-                                        lobj = TripleBarrierLabeler(vol_window=l_params['vol_window'], upper_mult=l_params['upper_mult'], lower_mult=l_params['lower_mult'], max_holding_period=l_params['max_holding'])
-                                        y_series = lobj.label(prices)['label']
-                                    elif l_params['type'] == "Combine":
-                                        lobj = CombinedLabeler(
-                                            amplitude_threshold=l_params['amp_th'], 
-                                            max_inactive_period=l_params['max_inactive'],
-                                            vol_window=l_params['vol_window'], 
-                                            upper_mult=l_params['upper_mult'], 
-                                            lower_mult=l_params['lower_mult'], 
-                                            max_holding=l_params['max_holding']
-                                        )
-                                        y_series = lobj.label(prices)['label']
-                                    elif l_params['type'] == "Regime":
-                                        lobj = StationarityLabeler(window=l_params['window'], vote_th=l_params['vote_th'])
-                                        y_series, _ = lobj.label(prices)
-                                    elif l_params['type'] == "TailSet":
-                                        w = l_params['window'] if l_params['window'] > 0 else 1
-                                        lobj = TailSetLabeler(ret_window=w, threshold=l_params['threshold'])
-                                        y_series = lobj.label(prices)['label']
-                                    
-                                    y_series.index = prices.index
-                                    
-                                    # Shift Correction for forward prediction
-                                    if l_params['type'] == "TailSet" and l_params['window'] > 1:
-                                        y_series = y_series.shift(-l_params['window'])
-                                    else:
-                                        y_series = y_series.shift(-1)
+                                # Classification (Directional)
+                                prices = df['close']
+                                if l_params['type'] == "Trend":
+                                    lobj = Labeler(amplitude_threshold=l_params['amp_th'], max_inactive_period=l_params['max_inactive'])
+                                    y_series = lobj.label(prices)['label']
+                                elif l_params['type'] == "BoxRange":
+                                    lobj = TripleBarrierLabeler(vol_window=l_params['vol_window'], upper_mult=l_params['upper_mult'], lower_mult=l_params['lower_mult'], max_holding_period=l_params['max_holding'])
+                                    y_series = lobj.label(prices)['label']
+                                elif l_params['type'] == "Combine":
+                                    lobj = CombinedLabeler(
+                                        amplitude_threshold=l_params['amp_th'], 
+                                        max_inactive_period=l_params['max_inactive'],
+                                        vol_window=l_params['vol_window'], 
+                                        upper_mult=l_params['upper_mult'], 
+                                        lower_mult=l_params['lower_mult'], 
+                                        max_holding=l_params['max_holding']
+                                    )
+                                    y_series = lobj.label(prices)['label']
+                                elif l_params['type'] == "Regime":
+                                    lobj = StationarityLabeler(window=l_params['window'], vote_th=l_params['vote_th'])
+                                    y_series, _ = lobj.label(prices)
+                                elif l_params['type'] == "TailSet":
+                                    w = l_params['window'] if l_params['window'] > 0 else 1
+                                    lobj = TailSetLabeler(ret_window=w, threshold=l_params['threshold'])
+                                    y_series = lobj.label(prices)['label']
+                                
+                                y_series.index = prices.index
+                                
+                                # Shift Correction for forward prediction
+                                if l_params['type'] == "TailSet" and l_params['window'] > 1:
+                                    y_series = y_series.shift(-l_params['window'])
                                 else:
-                                    prices = pd.to_numeric(df['close'], errors='coerce').ffill().values
-                                    y_series = pd.Series(np.log(prices[1:] / prices[:-1]), index=df.index[1:]).rolling(window=fwd_window).sum().shift(-fwd_window)
+                                    y_series = y_series.shift(-1)
                             # Filter targets based on Trade Direction
                             if is_classification:
                                 direction = input.trade_direction()
@@ -1022,22 +992,18 @@ def predictive_server(input, output, session):
                     p_meta_input = model.predict(X_train_meta)                        
                     p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
 
-                    if is_classification:
-                        # Get class probabilities
-                        p_meta_proba = model.predict_proba(X_train_meta)  # shape = (n_samples, n_classes)
-                        # Map predicted class to probability
-                        class_to_index = {c: i for i, c in enumerate(model.classes_)}
-                        pred_index = np.array([class_to_index[c] for c in p_meta_input])
-                        pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
-                        
-                        # Keep signal only if probability > 0.5, else 0 (no trade)
-                        p_meta_signals = pd.Series([
-                            sig if conf > 0.5 else 0
-                            for sig, conf in zip(p_meta_input, pred_conf)
-                        ], index=X_train_meta.index)
-
-                    if not is_classification:
-                        p_meta_signals = np.sign(p_meta_signals)
+                    # Get class probabilities
+                    p_meta_proba = model.predict_proba(X_train_meta)  # shape = (n_samples, n_classes)
+                    # Map predicted class to probability
+                    class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                    pred_index = np.array([class_to_index[c] for c in p_meta_input])
+                    pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
+                    
+                    # Keep signal only if probability > 0.5, else 0 (no trade)
+                    p_meta_signals = pd.Series([
+                        sig if conf > 0.5 else 0
+                        for sig, conf in zip(p_meta_input, pred_conf)
+                    ], index=X_train_meta.index)
                                     
                     direction = input.trade_direction()
                     if direction == "Long Only":
@@ -1055,10 +1021,7 @@ def predictive_server(input, output, session):
                         meta_df = full_df.reindex(X_train_meta.index)
                         y_meta = (p_meta_signals == y_train_meta).astype(int)
                     else:
-                        if is_classification:
-                            y_meta = (p_meta_signals == y_train_meta).astype(int)
-                        else:
-                            y_meta = (np.sign(p_meta_signals) * np.sign(y_ret_meta) > 0.0000).astype(int)
+                        y_meta = (p_meta_signals == y_train_meta).astype(int)
 
                     # Meta features = original features + primary prediction
                     meta_features = pd.concat([X_train_meta, pd.Series(p_meta_signals, index=X_train_meta.index, name='primary_pred')], axis=1)
@@ -1095,19 +1058,15 @@ def predictive_server(input, output, session):
                         # RAW signals backtest
                         p_test_input = model.predict(X_test)
                         p_test_signals = pd.Series(p_test_input, index=X_test.index)
-                        if not is_classification:
-                            p_test_signals = np.sign(p_test_signals)
-
-                        if is_classification:
-                            p_test_proba = model.predict_proba(X_test)  # shape = (n_samples, n_classes)
-                            pred_index = np.array([class_to_index[c] for c in p_test_input])
-                            pred_conf = p_test_proba[np.arange(len(pred_index)), pred_index]
-                            
-                            # Keep signal only if probability > 0.5, else 0 (no trade)
-                            p_test_signals = pd.Series([
-                                sig if conf > 0.5 else 0
-                                for sig, conf in zip(p_test_input, pred_conf)
-                            ], index=X_test.index)
+                        p_test_proba = model.predict_proba(X_test)  # shape = (n_samples, n_classes)
+                        pred_index = np.array([class_to_index[c] for c in p_test_input])
+                        pred_conf = p_test_proba[np.arange(len(pred_index)), pred_index]
+                        
+                        # Keep signal only if probability > 0.5, else 0 (no trade)
+                        p_test_signals = pd.Series([
+                            sig if conf > 0.5 else 0
+                            for sig, conf in zip(p_test_input, pred_conf)
+                        ], index=X_test.index)
                         
                         direction = input.trade_direction()
                         if direction == "Long Only":
@@ -1129,10 +1088,7 @@ def predictive_server(input, output, session):
                         meta_probs = meta_model.predict_proba(meta_test_features)
                         meta_preds = meta_model.predict(meta_test_features)
                         
-                        if is_classification:
-                            y_meta_test = (p_test_signals == y_test).astype(int)
-                        else:
-                            y_meta_test = (np.sign(p_test_signals) * np.sign(y_ret_test) > 0.0).astype(int)
+                        y_meta_test = (p_test_signals == y_test).astype(int)
 
                         idx_1 = np.where(meta_model.classes_ == 1)[0]
                         if len(idx_1) > 0:
@@ -1260,18 +1216,12 @@ def predictive_server(input, output, session):
         
         with reactive.isolate():
             # Get basics from UI inputs
-            goal = input.analysis_goal()
-            is_classification = (goal == "Directional")
+            # Directional Analysis
+            is_classification = True
             interval = input.interval()
             
             # Determine ticker
-            if is_classification:
-                ticker = input.selected_ticker()
-            else:
-                ts = list(input.selected_tickers())
-                if not ts: return None
-                ticker = ts[0]
-                
+            ticker = input.selected_ticker()
             if not ticker or not interval: return None
         
             # Load data based on Bar Type
@@ -1297,61 +1247,52 @@ def predictive_server(input, output, session):
             
             # Calculate Labels
             try:
-                if is_classification:
-                    l_type = input.labeler_type()
-                    prices = df['close']
-                    if l_type == "Trend":
-                        lobj = Labeler(amplitude_threshold=input.amp_th_bps(), max_inactive_period=input.max_inactive())
-                        y_series = lobj.label(prices)['label']
-                    elif l_type == "BoxRange":
-                        lobj = TripleBarrierLabeler(vol_window=input.vol_window(), upper_mult=input.upper_mult(), lower_mult=input.lower_mult(), max_holding_period=input.max_holding())
-                        y_series = lobj.label(prices)['label']
-                    elif l_type == "Combine":
-                        lobj = CombinedLabeler(
-                            amplitude_threshold=input.amp_th_bps(), 
-                            max_inactive_period=input.max_inactive(),
-                            vol_window=input.vol_window(), 
-                            upper_mult=input.upper_mult(), 
-                            lower_mult=input.lower_mult(), 
-                            max_holding=input.max_holding()
-                        )
-                        y_series = lobj.label(prices)['label']
-                    elif l_type == "TailSet":
-                        lobj = TailSetLabeler(ret_window=input.tail_window(), threshold=input.tail_threshold())
-                        y_series = lobj.label(prices)['label']
-                    else: # Regime
-                        lobj = StationarityLabeler(window=input.stat_window(), vote_th=input.vote_th())
-                        y_series, _ = lobj.label(prices)
-                    
-                    y_series.index = prices.index
-                    y_series = y_series.shift(-1)
-                else:
-                    # Return Value (Forward Return)
-                    prices_arr = pd.to_numeric(df['close'], errors='coerce').ffill().values
-                    fwd_window = input.fwd_window()
-                    y_series = pd.Series(np.log(prices_arr[1:] / prices_arr[:-1]), index=df.index[1:]).rolling(window=fwd_window).sum().shift(-fwd_window)
+                # Classification (Directional)
+                l_type = input.labeler_type()
+                prices = df['close']
+                if l_type == "Trend":
+                    lobj = Labeler(amplitude_threshold=input.amp_th_bps(), max_inactive_period=input.max_inactive())
+                    y_series = lobj.label(prices)['label']
+                elif l_type == "BoxRange":
+                    lobj = TripleBarrierLabeler(vol_window=input.vol_window(), upper_mult=input.upper_mult(), lower_mult=input.lower_mult(), max_holding_period=input.max_holding())
+                    y_series = lobj.label(prices)['label']
+                elif l_type == "Combine":
+                    lobj = CombinedLabeler(
+                        amplitude_threshold=input.amp_th_bps(), 
+                        max_inactive_period=input.max_inactive(),
+                        vol_window=input.vol_window(), 
+                        upper_mult=input.upper_mult(), 
+                        lower_mult=input.lower_mult(), 
+                        max_holding=input.max_holding()
+                    )
+                    y_series = lobj.label(prices)['label']
+                elif l_type == "TailSet":
+                    lobj = TailSetLabeler(ret_window=input.tail_window(), threshold=input.tail_threshold())
+                    y_series = lobj.label(prices)['label']
+                else: # Regime
+                    lobj = StationarityLabeler(window=input.stat_window(), vote_th=input.vote_th())
+                    y_series, _ = lobj.label(prices)
+                
+                y_series.index = prices.index
+                y_series = y_series.shift(-1)
                 
                 y_series.index = df.index
                 
                 # Store in cache
-                if is_classification:
-                    cache_key = f"{ticker}_{interval}_{b_type}_{l_type}"
-                    l_params_for_cache = {
-                        'type': l_type,
-                        'amp_th': input.amp_th_bps() if l_type in ["Trend", "Combine"] else None,
-                        'max_inactive': input.max_inactive() if l_type in ["Trend", "Combine"] else None,
-                        'vol_window': input.vol_window() if l_type in ["BoxRange", "Combine"] else None,
-                        'upper_mult': input.upper_mult() if l_type in ["BoxRange", "Combine"] else None,
-                        'lower_mult': input.lower_mult() if l_type in ["BoxRange", "Combine"] else None,
-                        'max_holding': input.max_holding() if l_type in ["BoxRange", "Combine"] else None,
-                        'stat_window': input.stat_window() if l_type == "Regime" else None,
-                        'vote_th': input.vote_th() if l_type == "Regime" else None,
-                        'tail_window': input.tail_window() if l_type == "TailSet" else None,
-                        'tail_threshold': input.tail_threshold() if l_type == "TailSet" else None
-                    }
-                else:
-                    cache_key = f"{ticker}_{interval}_{b_type}_regression_{fwd_window}"
-                    l_params_for_cache = {"fwd_window": fwd_window}
+                cache_key = f"{ticker}_{interval}_{b_type}_{l_type}"
+                l_params_for_cache = {
+                    'type': l_type,
+                    'amp_th': input.amp_th_bps() if l_type in ["Trend", "Combine"] else None,
+                    'max_inactive': input.max_inactive() if l_type in ["Trend", "Combine"] else None,
+                    'vol_window': input.vol_window() if l_type in ["BoxRange", "Combine"] else None,
+                    'upper_mult': input.upper_mult() if l_type in ["BoxRange", "Combine"] else None,
+                    'lower_mult': input.lower_mult() if l_type in ["BoxRange", "Combine"] else None,
+                    'max_holding': input.max_holding() if l_type in ["BoxRange", "Combine"] else None,
+                    'stat_window': input.stat_window() if l_type == "Regime" else None,
+                    'vote_th': input.vote_th() if l_type == "Regime" else None,
+                    'tail_window': input.tail_window() if l_type == "TailSet" else None,
+                    'tail_threshold': input.tail_threshold() if l_type == "TailSet" else None
+                }
                 
                 cache = labeled_data.get()
                 cache[cache_key] = {
@@ -1360,13 +1301,13 @@ def predictive_server(input, output, session):
                     "ticker": ticker,
                     "interval": interval,
                     "bar_type": b_type,
-                    "is_classification": is_classification,
+                    "is_classification": True,
                     "params": l_params_for_cache
                 }
                 labeled_data.set(cache)
                 print(f"✓ Stored labels in cache with key: {cache_key}")
                 
-                return {"df": df, "y": y_series, "ticker": ticker, "is_classification": is_classification}
+                return {"df": df, "y": y_series, "ticker": ticker, "is_classification": True}
             except Exception as e:
                 logger.log("Predictive", "ERROR", f"Labeling calculation error: {e}")
                 return None
@@ -1396,8 +1337,9 @@ def predictive_server(input, output, session):
 
         df.index = df.index.strftime('%Y-%m-%d %H:%M')
 
+        y_clean = y.dropna()
+        prices = df['close'].iloc[-(len(y_clean)):]
         if res['is_classification']:
-            y_clean = y.dropna()
             df_plot = df
             # Convert labels to numeric for continuous color scale
             df_plot['label'] = y_clean.map({1: 1, 0: 0, -1: -1})
@@ -1511,30 +1453,20 @@ def predictive_server(input, output, session):
             preds_train = model.predict(X_train)
             is_classification = res['is_classification']
 
-            if is_classification:
-                acc_test = accuracy_score(y_test, preds_test)
-                acc_train = accuracy_score(y_train, preds_train)
-                return ui.layout_columns(
-                    ui.value_box("Test Accuracy", f"{acc_test:.1%}", showcase=fa.icon_svg("bullseye")),
-                    ui.value_box("Train Accuracy", f"{acc_train:.1%}", showcase=fa.icon_svg("graduation-cap")),
-                    ui.value_box("Total Samples", len(y_train) + len(res['y_train_meta']) + len(y_test), showcase=fa.icon_svg("database"))
-                )
-            else:
-                r2_test = r2_score(y_test, preds_test)
-                r2_train = r2_score(y_train, preds_train)
-                mse = mean_squared_error(y_test, preds_test)
-                return ui.layout_columns(
-                    ui.value_box("Test R²", f"{r2_test:.3f}", showcase=fa.icon_svg("chart-line")),
-                    ui.value_box("Train R²", f"{r2_train:.3f}", showcase=fa.icon_svg("graduation-cap")),
-                    ui.value_box("Test MSE", f"{mse:.5f}", showcase=fa.icon_svg("calculator"))
-                )
+            acc_test = accuracy_score(y_test, preds_test)
+            acc_train = accuracy_score(y_train, preds_train)
+            return ui.layout_columns(
+                ui.value_box("Test Accuracy", f"{acc_test:.1%}", showcase=fa.icon_svg("bullseye")),
+                ui.value_box("Train Accuracy", f"{acc_train:.1%}", showcase=fa.icon_svg("graduation-cap")),
+                ui.value_box("Total Samples", len(y_train) + len(res['y_train_meta']) + len(y_test), showcase=fa.icon_svg("database"))
+            )
         except Exception as e:
             return ui.div(f"Error in KPIs: {e}", class_="text-danger")
 
     @render.table
     def classification_report_table():
         res = results.get()
-        if not res or not res['is_classification']: return None
+        if not res: return None
         preds_test = res['model'].predict(res['X_test'])
         report = classification_report(res['y_test'], preds_test, labels=[-1, 0, 1], target_names=["DOWN", "SIDEWAYS", "UP"], output_dict=True)
         df = pd.DataFrame(report).transpose().round(3).reset_index()
@@ -1658,18 +1590,14 @@ def predictive_server(input, output, session):
                                 meta_sizing = 0.0
 
                         row = {"Ticker": sym, "Price": f"{latest_price:,.2f}", "Sizing": f"{meta_sizing:.1%}"}
-                        if is_classification:
-                            mapping = {1: "UP", -1: "DOWN", 0: "SIDEWAYS"}
-                            pred_val = mapping.get(signal, "N/A")
-                            badge_class = "prediction-up" if signal == 1 else "prediction-down" if signal == -1 else ""
-                            row.update({"Predicted": f'<span class="prediction-badge {badge_class}">{pred_val}</span>'})
-                            
-                            if hasattr(model, "predict_proba"):
-                                confidence = np.max(model.predict_proba(X_pred)[0])
-                                row["Confidence"] = f"{confidence:.1%}"
-                        else:
-                            row.update({"Predicted Ret": f"{signal:.4f}"})
-                            row["Signal"] = "LONG" if signal > 0 else "SHORT"
+                        mapping = {1: "UP", -1: "DOWN", 0: "SIDEWAYS"}
+                        pred_val = mapping.get(signal, "N/A")
+                        badge_class = "prediction-up" if signal == 1 else "prediction-down" if signal == -1 else ""
+                        row.update({"Predicted": f'<span class="prediction-badge {badge_class}">{pred_val}</span>'})
+                        
+                        if hasattr(model, "predict_proba"):
+                            confidence = np.max(model.predict_proba(X_pred)[0])
+                            row["Confidence"] = f"{confidence:.1%}"
                         
                         # Terminal styling for sizing
                         row["Sizing"] = f'<span style="color: #FCC780; font-weight: 700;">{meta_sizing:.1%}' + (' [!]' if meta_sizing > 0.8 else '') + '</span>'

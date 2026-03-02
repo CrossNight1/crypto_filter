@@ -69,13 +69,18 @@ METRIC_LABELS = {
     'price_sma_diff': 'Price vs SMA %',
     'vam': 'VAM (Vol-Adj Momentum)',
     'skewness': 'Return Skewness',
-    'return_lag1': 'Return Lag 1',
-    'return_lag2': 'Return Lag 2',
-    'return_lag3': 'Return Lag 3',
+    'sign_lag1': 'Sign Lag 1',
+    'sign_lag2': 'Sign Lag 2',
+    'sign_lag3': 'Sign Lag 3',
+    'rolling_sign_lag5': 'Rolling Sign (5)',
+    'rolling_sign_lag10': 'Rolling Sign (10)',
+    'rolling_sign_lag20': 'Rolling Sign (20)',
+    'autocorr_1': 'Autocorr (1)',
     'autocorr_5': 'Autocorr (5)',
     'ewma': 'EWMA (Price Norm)',
     'imbalance_bar': 'Imbalance Bar',
     'vol_imbalance': 'Volatility Imbalance',
+    'vama': 'VAMA',
     'None': 'None'
 }
 
@@ -84,12 +89,14 @@ ALL_METRICS = [
     'beta', 'alpha', 'volatility', 'sharpe', 'fip', 
     'metric_return', 'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
     'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
-    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance'
+    'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20',
+    'autocorr_1', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance', 'vama'
 ]
 
 DEFAULT_FEATURES = [
     'volatility',
-    'ewva', 'vol_imbalance',
-    'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'vam', 'skewness',
-    'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar'
+    'ewva', 'vol_imbalance', 'vama',
+    'cmf', 'vwap_z', 'rsi_norm', 'vam', 'skewness',
+    'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag20',
+    'autocorr_5', 'ewma', 'imbalance_bar', 'vama', 'fip', 'aroon_osc'
 ]

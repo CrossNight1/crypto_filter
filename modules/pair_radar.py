@@ -37,9 +37,8 @@ def pair_radar_ui():
             ui.input_select("pair_mode", "Generation Mode", 
                            choices={"ratio": "Ratio", "spread": "Spread"}, selected="spread"),
             ui.hr(),
-            ui.h5("Chart Controls"),
-            ui.input_numeric("rolling_window", "Rolling Window", value=50, min=5),
-            ui.input_numeric("pair_window", "Window", value=500, min=30),
+            ui.input_numeric("rolling_window", "Rolling Window", value=320, min=5),
+            ui.input_numeric("pair_window", "Window", value=1200, min=30),
         ),
         ui.navset_card_pill(
             ui.nav_panel("Dashboard",

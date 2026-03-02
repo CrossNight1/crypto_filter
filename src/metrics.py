@@ -114,6 +114,17 @@ class MetricsEngine:
     def vwap(df: pd.DataFrame) -> pd.Series:
         tp = (df['high'] + df['low'] + df['close']) / 3
         return (tp * df['volume']).cumsum() / df['volume'].cumsum()
+    
+    @staticmethod
+    def vama(close: pd.Series, w_short: int = 40, w_slow: int = 120) -> pd.Series:
+        rets = np.log(close / close.shift()).fillna(0)
+        s_std = rets.ewm(span=w_short).std()
+        l_std = rets.ewm(span=w_slow).std()
+        alpha = ((l_std * 0.5) / s_std).clip(lower=0.05, upper=0.95).fillna(0.05)
+        vama = close.copy()
+        for i in range(1, len(close)):
+            vama.iloc[i] = alpha.iloc[i] * close.iloc[i] + (1 - alpha.iloc[i]) * vama.iloc[i-1]
+        return vama
 
     @staticmethod
     def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, interval: str = '1h') -> pd.DataFrame:
@@ -148,7 +159,7 @@ class MetricsEngine:
         res['bbp'] = (close - lbb) / bb_range
         
         # 4. RSI (Normalized): RSI / 100
-        res['rsi_norm'] = MetricsEngine.rsi(close, window) / 100
+        res['rsi_norm'] = (MetricsEngine.rsi(close, window) - 50) / 100
         
         # 5. Return Z-Score: (Return - mean(Return)) / std(Return)
         ret = close.pct_change()
@@ -183,15 +194,20 @@ class MetricsEngine:
         # 11. Return Skewness (Rolling)
         res['skewness'] = ret.rolling(window).skew()
         
-        # 12. Lagged Returns
-        res['return_lag1'] = ret.shift(1)
-        res['return_lag2'] = ret.shift(2)
-        res['return_lag3'] = ret.shift(3)
-        
-        # 13. Autocorrelation (5-window)
-        # Using rolling apply for autocorrelation
-        res['autocorr_5'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
-        
+        # 12. Lagged Signs
+        res['sign_lag1'] = np.sign(ret.shift(1))
+        res['sign_lag2'] = np.sign(ret.shift(2))
+        res['sign_lag3'] = np.sign(ret.shift(3))
+
+        # 13. Rolling lagged sign
+        res['rolling_sign_lag5'] = np.sign(ret.rolling(5).mean())
+        res['rolling_sign_lag10'] = np.sign(ret.rolling(10).mean())
+        res['rolling_sign_lag20'] = np.sign(ret.rolling(20).mean())
+
+        # 14. Autocorrelation
+        res['autocorr_1'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
+        res['autocorr_5'] = ret.rolling(20).apply(lambda x: x.autocorr(lag=5) if len(x) == 20 else np.nan, raw=False)
+
         # 14. EWMA (Simple EMA of price normalized by price)
         res['ewma'] = MetricsEngine.ema(close, window) / close
         
@@ -199,6 +215,9 @@ class MetricsEngine:
         body = (close - df['open']).abs()
         rng = (high - low).abs().replace(0, 1e-9)
         res['imbalance_bar'] = (body / rng) * np.sign(ret).fillna(0)
+
+        # 16. VAMA (Volatility Adjusted Moving Average)
+        res['vama'] = MetricsEngine.vama(close, w_short, w_slow) / close
         
         # --- Standard/Legacy Metrics for Snapshot/Table use ---
         ann_factor = MetricsEngine.get_annual_scaling(interval)
@@ -206,7 +225,7 @@ class MetricsEngine:
         # Sharpe & Volatility
         res['sharpe'] = (ret.ewm(span=window).mean() / ret.ewm(span=window).std()) * np.sqrt(ann_factor)
         res['volatility'] = ret.ewm(span=window).std() * np.sqrt(ann_factor)
-        res['vol_imbalance'] = ret.ewm(span=window).std() / ret.ewm(span=window * 10).std()
+        res['vol_imbalance'] = ret.ewm(span=w_short).std() / ret.ewm(span=w_slow).std()
         
         # FIP (Frog-in-the-Pan)
         def fip_func(x):
@@ -551,7 +570,9 @@ class MetricsEngine:
         new_metrics = [
             'ewva', 'aroon_osc', 'bbp', 'rsi_norm', 'return_z', 'atr_norm', 
             'cmf', 'vwap_z', 'rel_strength_z', 'vam', 'skewness',
-            'return_lag1', 'return_lag2', 'return_lag3', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance'
+            'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 
+            'rolling_sign_lag20', 'autocorr_1', 'autocorr_5', 'ewma', 'imbalance_bar', 
+            'vol_imbalance', 'vama'
         ]
         
         if metric_name in new_metrics:

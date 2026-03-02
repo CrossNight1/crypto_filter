@@ -101,12 +101,11 @@ def symbol_diagnostics_ui():
     return ui.page_fluid(
         ui.layout_sidebar(
             ui.sidebar(
+                ui.input_action_button("btn_run_diag", "Run Diagnostics", class_="btn-primary w-100 mt-2"),
                 ui.input_selectize("diag_symbol", "Select Symbol", choices=[], selected="BTCUSDT", multiple=False),
                 ui.input_select("diag_interval", "Interval", choices=AVAILABLE_INTERVALS, selected="1h"),
                 ui.input_numeric("metric_window", "Metrics Window", value=10, min=20, max=500),
                 ui.input_numeric("diag_window", "Analysis Window", value=100, min=20, max=500),
-                ui.input_action_button("btn_run_diag", "Run Diagnostics", class_="btn-primary w-100 mt-2"),
-                ui.hr(),
             ),
             
             ui.navset_card_underline(
@@ -226,7 +225,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                                 "symbol": {"oldest": "-", "latest": "-"}})
     
     def get_timestamps(symbol, interval):
-        df = manager.load_data(symbol, interval)
+        # Disable auto_sync for metadata checks to prevent startup data fetching
+        df = manager.load_data(symbol, interval, auto_sync=False)
         if df is not None and not df.empty and 'open_time' in df.columns:
             ts = pd.to_datetime(df['open_time'])
             return {"oldest": str(ts.min()), "latest": str(ts.max())}
@@ -236,7 +236,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
     def populate_symbols():
         inventory = manager.get_inventory()
         all_syms = sorted(inventory.keys())
-        ui.update_selectize("diag_symbol", choices=all_syms, server=True)
+        ui.update_selectize("diag_symbol", choices=all_syms, selected="BTCUSDT", server=True)
         
         # Set benchmark/global timestamps once
         global_ts = get_timestamps(BENCHMARK_SYMBOL, input.diag_interval())
@@ -414,39 +414,10 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             
             p.set(90, message="Relationships...")
             
-            # 7. Cointegration/Correlation
-            # We check correlation against the "Top Symbols" loaded earlier
-            if not factor_df.empty:
-                sym_series_aligned = pd.Series(log_rets[-window:], index=factor_df.index)
-                corrs = factor_df.corrwith(sym_series_aligned).sort_values(ascending=False)
-                
-                # Simple coint check
-                from statsmodels.tsa.stattools import coint
-                from scipy.stats import zscore
-                coint_scores = []
-                zscore_spreads = []
-
-                for other_sym in corrs.index:
-                    try:
-                        s1 = factor_df[other_sym].values
-                        s2 = sym_series_aligned.values
-
-                        t_stat, pval, _ = coint(s1, s2)
-                        beta = np.polyfit(s2, s1, 1)[0]
-                        spread = s1 - beta * s2
-                        zscore_spread = zscore(spread)[-1]
-
-                        coint_scores.append(t_stat)
-                        zscore_spreads.append(zscore_spread)
-
-                    except:
-                        coint_scores.append(1.0)
-                        zscore_spreads.append(0.0)
-
-            else:
-                corrs = pd.Series()
-                coint_scores = []
-                zscore_spreads = []
+            # Relationships (Deprecated)
+            corrs = pd.Series()
+            coint_scores = []
+            zscore_spreads = []
 
             col_droped = ["volatility"]
             latest_metrics = latest_metrics.drop(columns=col_droped)
@@ -471,13 +442,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 "mn_cum_ret": mn_cum_ret if not mn_cum_ret.empty else pd.Series(),
                 "fc_price": {"hist": history_price, "fc": fc_mean, "ci": fc_ci},
                 "fc_vol": {"hist": hist_vol, "fc": vol_forecast_vals},
-                "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values},
-                "relationships": pd.DataFrame({
-                    "Symbol": corrs.index, 
-                    "Correlation": corrs.values, 
-                    "Coint_PValue": coint_scores,
-                    "ZScore_Spread": zscore_spreads
-                }) if not corrs.empty else pd.DataFrame()
+                "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values}
             }
             
             diag_data.set(data_pack)
@@ -565,8 +530,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             plot_bgcolor=THEME_BG,
             font=dict(family=THEME_FONT, color=THEME_TEXT),
             showlegend=False,
-            height=400,
-            width=735
+            height=450,
+            width=700
         )
         return apply_theme(fig)
 
@@ -588,7 +553,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             title="Market-Neutral Cumulative Return (Ex-PC1)",
             xaxis_title="Periods",
             yaxis_title="Cumulative Return",
-            height=400, width=735)
+            height=450, width=700)
         return apply_theme(fig)
 
     @render_widget
@@ -618,7 +583,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         ))
         
         fig.update_layout(
-            template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=735)
+            template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=700)
         return apply_theme(fig)
 
     @render_widget
@@ -661,56 +626,9 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             ))
 
         fig.update_layout(
-            template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=735)
+            template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=700)
         return apply_theme(fig)
 
-    @render_widget
-    def plot_coint():
-        d = diag_data.get()
-        if not d or 'relationships' not in d or d['relationships'].empty:
-            logger.log("Symbol Diagnostics", "DEBUG", "No relationship data available")
-            return go.Figure()
-        
-        # Make a copy to avoid mutating the original data
-        df = d['relationships'].copy()
-        logger.log("Symbol Diagnostics", "INFO", f"Rendering cointegration chart with {len(df)} symbols")
-        
-        # Scatter plot: X=Correlation, Y=Cointegration (inverse of p-value for visual clarity)
-        # Lower p-value = stronger cointegration, so we plot 1-pval or -log(pval)
-        # df['Coint_Strength'] = -np.log10(df['Coint_PValue'].clip(lower=1e-10))
-        
-        fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(
-            x=df['ZScore_Spread'],
-            y=df['Coint_PValue'],
-            mode='markers+text',
-            marker=dict(
-
-                size=15,
-                color=df['Correlation'],
-                colorscale='Spectral_r',
-                showscale=True,
-                colorbar=dict(
-                    title="Correlation"
-                ),
-                line=dict(color='cyan', width=1),
-                opacity=0.5
-            ),
-            text=df['Symbol'],
-            textposition='top center',
-            textfont=dict(size=10, color='white')
-        ))
-        
-        fig.update_layout(
-            xaxis_title="Z-Score Spread",
-            yaxis_title="T-Stat",
-            template="plotly_dark",
-            height=500,
-            width=1480
-        )
-        
-        return apply_theme(fig)
 
     @reactive.calc
     @reactive.event(input.btn_generate_bars)

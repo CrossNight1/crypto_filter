@@ -129,7 +129,8 @@ def server(input, output, session):
     data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"}})
     
     def get_timestamps(symbol, interval):
-        df = manager.load_data(symbol, interval)
+        # Disable auto_sync for metadata checks to prevent startup data fetching
+        df = manager.load_data(symbol, interval, auto_sync=False)
         if df is not None and not df.empty and 'open_time' in df.columns:
             ts = pd.to_datetime(df['open_time'])
             return {"oldest": str(ts.min()), "latest": str(ts.max())}

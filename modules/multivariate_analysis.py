@@ -154,7 +154,7 @@ def multivariate_analysis_ui():
                         ),
                     ),
 
-                    ui.input_select("decomp_interval", "Timeframe", choices=[]),
+                    ui.input_select("decomp_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1h"),
 
                     ui.input_numeric(
                         "decomp_window",
@@ -198,26 +198,73 @@ def multivariate_analysis_server(input, output, session):
     # ── Shared inventory updates ──────────────────────────────
 
     @reactive.effect
-    def _():
-        inventory = manager.get_inventory()
-        if not inventory:
-            return
-        # intervals = sorted(list(set(i for ivs in inventory.values() for i in ivs)))
-        ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected="1h")
-        ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected="1h")
-
+    @reactive.event(input.corr_interval, input.decomp_interval)
+    def _update_interval_choices():
+        ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected=input.corr_interval())
+        ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected=input.decomp_interval())
 
     @reactive.effect
-    def _():
-        # Initialize selections if empty
-        if not selected_symbols_corr.get():
-            syms = manager.fetcher.get_top_volume_symbols(top_n=input.n_assets())
-            selected_symbols_corr.set(set(MANDATORY_CRYPTO).union(syms))
-        
-        if not selected_symbols_decomp.get():
-            syms = manager.fetcher.get_top_volume_symbols(top_n=input.decomp_n_assets())
-            selected_symbols_decomp.set(set(MANDATORY_CRYPTO).union(syms))
+    @reactive.event(input.n_assets)
+    def _update_corr_symbols_list():
+        try:
+            val = input.n_assets()
+            if not val: return
+            n = int(val)
+            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            new_syms = set(MANDATORY_CRYPTO).union(syms)
+            selected_symbols_corr.set(new_syms)
+            
+            interval = input.corr_interval()
+            inventory = manager.get_inventory()
+            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("corr_symbols", choices=all_syms, selected=sorted(list(new_syms)))
+        except:
+            pass
 
+    @reactive.effect
+    @reactive.event(input.decomp_n_assets)
+    def _update_decomp_symbols_list():
+        try:
+            val = input.decomp_n_assets()
+            if not val: return
+            n = int(val)
+            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            new_syms = set(MANDATORY_CRYPTO).union(syms)
+            selected_symbols_decomp.set(new_syms)
+            
+            interval = input.decomp_interval()
+            inventory = manager.get_inventory()
+            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("decomp_symbols", choices=all_syms, selected=sorted(list(new_syms)))
+        except:
+            pass
+            
+    # Trigger population on tab switch (if the nav ID is 'main_nav')
+    # This ensures symbols are ready when user enters the tab
+    @reactive.effect
+    def _populate_on_tab():
+        # Listen to parent nav if available
+        try:
+            current_nav = input.main_nav()
+            if current_nav == "MULTIVARIATE":
+                # Trigger both updates if they are uninitialized or just refresh
+                _update_corr_symbols_list()
+                _update_decomp_symbols_list()
+        except:
+            pass
+
+    @reactive.effect
+    @reactive.event(input.btn_gen_corr, input.btn_run_decomp)
+    def _initialize_selections():
+        # This fallback is now less necessary but kept for safety
+        if not selected_symbols_corr.get():
+            selected_symbols_corr.set(set(MANDATORY_CRYPTO))
+        if not selected_symbols_decomp.get():
+            selected_symbols_decomp.set(set(MANDATORY_CRYPTO))
+
+    @reactive.effect
+    @reactive.event(input.corr_interval, input.decomp_interval)
+    def _update_symbol_choices():
         # React to interval changes but preserve or update selections based on inventory
         inventory = manager.get_inventory()
         if not inventory:
@@ -226,8 +273,6 @@ def multivariate_analysis_server(input, output, session):
         corr_int = input.corr_interval()
         all_syms_corr = sorted([s for s, ints in inventory.items() if corr_int in ints])
         curr_sel_corr = sorted(list(selected_symbols_corr.get()))
-        # Filter selected symbols to ensure they exist in current interval if needed 
-        # (or just show all choices and let data loader handle missing data)
         ui.update_selectize("corr_symbols", choices=all_syms_corr, selected=curr_sel_corr)
         
         decomp_int = input.decomp_interval()
@@ -287,32 +332,32 @@ def multivariate_analysis_server(input, output, session):
                     progress.set(i + 1)
         return data_map
     @reactive.effect
-    def _():
+    @reactive.event(input.btn_gen_corr)
+    def _handle_corr_sync():
+        # Move symbol population back inside the gated button trigger
         try:
-            val = input.n_assets()
-            if not val: return
-            n_assets = int(val)
-        except ValueError:
-            return
+            n = int(input.n_assets() or 20)
+        except:
+            n = 20
             
         interval = input.corr_interval()
+        if not interval: return
         
         with ui.Progress(min=0, max=100) as p:
-            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
-            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
-            syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
+            top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
             selected_symbols_corr.set(set(syms))
             
             inventory = manager.get_inventory()
-            sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
-            ui.update_selectize("corr_symbols", choices=sym_choices, selected=syms)
+            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("corr_symbols", choices=all_syms, selected=syms)
 
-            if n_assets > 10:
-                p.set(10, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
-                    for i, _ in enumerate(as_completed(futures)):
-                        p.set(10 + int(90 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i]}")
+            p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
+                for i, _ in enumerate(as_completed(futures)):
+                    p.set(20 + int(80 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i] if i < len(syms) else ''}")
             p.set(100, message="Sync complete")
 
     # ══════════════════════════════════════════════════════════
@@ -484,32 +529,31 @@ def multivariate_analysis_server(input, output, session):
         return fig
 
     @reactive.effect
-    def _():
+    @reactive.event(input.btn_run_decomp)
+    def _handle_decomp_sync():
         try:
-            val = input.decomp_n_assets()
-            if not val: return
-            n_assets = int(val)
-        except ValueError:
-            return
+            n = int(input.decomp_n_assets() or 20)
+        except:
+            n = 20
             
         interval = input.decomp_interval()
+        if not interval: return
         
         with ui.Progress(min=0, max=100) as p:
-            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
-            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
-            syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
+            top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
             selected_symbols_decomp.set(set(syms))
             
             inventory = manager.get_inventory()
-            sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
-            ui.update_selectize("decomp_symbols", choices=sym_choices, selected=syms)
+            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            ui.update_selectize("decomp_symbols", choices=all_syms, selected=syms)
 
-            if n_assets > 10:
-                p.set(10, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
-                    for i, _ in enumerate(as_completed(futures)):
-                        p.set(10 + int(90 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i]}")
+            p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
+                for i, _ in enumerate(as_completed(futures)):
+                    p.set(20 + int(80 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i] if i < len(syms) else ''}")
             p.set(100, message="Sync complete")
 
     # ══════════════════════════════════════════════════════════
