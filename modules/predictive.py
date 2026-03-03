@@ -113,14 +113,14 @@ def predictive_ui():
                         ui.input_slider("rf_max_depth", "Max Depth", min=2, max=50, value=5)
                     ),
 
-                    ui.input_slider("test_size", "Test Set Ratio (%)", min=0, max=50, value=20, step=5),
+                    ui.input_slider("test_size", "Test Set Ratio (%)", min=0, max=50, value=30, step=5),
                     ui.input_switch("standardize", "Standardize Features", value=True),
                     ui.input_switch("remove_outliers", "Remove Outliers", value=False),
                 ),
                 ui.accordion_panel(
                     "Backtest Parameters",
                     
-                    ui.input_numeric("max_positions", "Max Positions", value=10, min=1),
+                    ui.input_numeric("max_positions", "Max Positions", value=20, min=1),
                     
                     ui.input_numeric("min_holding_bt", "Min Hold", value=2, min=1),
                     ui.input_numeric("max_holding_bt", "Max Hold", value=10, min=1),
@@ -823,7 +823,9 @@ def predictive_server(input, output, session):
                         df = df.iloc[-(input.pred_lookback() + input.eng_lookback()):]
                         
                         try:
-                            feats_data = {feat: engine.calculate_rolling_metric(df, feat, window=ind_window, interval=interval) for feat in x_features}
+                            # Optimized: Calculate all metrics once per ticker instead of per feature
+                            all_metrics_df = engine.calculate_all_indicators(df, window=ind_window, interval=interval)
+                            feats_data = {feat: all_metrics_df[feat] for feat in x_features if feat in all_metrics_df.columns}
                             
                             # Check label cache first
                             cache_key = f"{sym}_{interval}_{b_type}_{l_params['type']}"
@@ -941,7 +943,7 @@ def predictive_server(input, output, session):
                 
                 # Auto-Split Training set into 2 folds:
                 train_n = test_start
-                meta_start = int(train_n * 0.5)
+                meta_start = int(train_n * 0.6)
                 
                 logger.log("Predictive", "INFO", f"Splitting data: n={n}, test_start={test_start}, auto-split train at {meta_start}")
                 
@@ -1112,6 +1114,63 @@ def predictive_server(input, output, session):
                             'meta_probs': pd.Series(meta_probs, index=X_test.index),
                             'y_meta_test': pd.Series(y_meta_test, index=X_test.index) if isinstance(y_meta_test, np.ndarray) else y_meta_test,
                             'meta_preds': pd.Series(meta_preds, index=X_test.index)
+                        }
+                    else:
+                        # Multi-ticker: Simple "Naive Portfolio" Backtest
+                        # Average returns per timestamp across symbols
+                        p_test = model.predict(X_test)
+                        bt = pd.DataFrame({'Pred': p_test, 'Ret': y_ret_test}, index=X_test.index).sort_index()
+                        
+                        meta_sizing = np.ones(len(bt))
+                        if meta_model is not None:
+                            X_meta = pd.concat([X_test, pd.Series(p_test, index=X_test.index, name='primary_pred')], axis=1)
+                            # Extra safety: unbox for meta model
+                            X_meta = force_scalar_numeric(X_meta)
+                            probs = meta_model.predict_proba(X_meta)
+                            idx_1 = np.where(meta_model.classes_ == 1)[0]
+                            if len(idx_1) > 0:
+                                meta_probs = probs[:, idx_1[0]]
+                                meta_sizing = meta_sizing_cal(meta_probs)
+                        
+                        if is_classification:
+                            bt['Raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0) + np.where(bt['Pred'] == -1, -bt['Ret'], 0)
+                        else:
+                            bt['Raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0) + np.where(bt['Pred'] < 0, -bt['Ret'], 0)
+                        
+                        bt['Meta'] = bt['Raw'] * meta_sizing
+                        
+                        def get_bt_stats(series, label, interval):
+                            ret = series.replace([np.inf, -np.inf], 0).fillna(0)
+                            equity = np.exp(ret.cumsum())
+                            total_ret = equity.iloc[-1] - 1
+                            active = ret[ret != 0]
+                            win_rate = (active > 0).sum() / len(active) if len(active) > 0 else 0
+                            ann_factor = MetricsEngine.get_annual_scaling(interval)
+                            
+                            std = ret.std()
+                            sharpe = (ret.mean() / std) * np.sqrt(ann_factor) if std > 1e-12 else 0.0
+                            max_dd = abs(((equity / equity.cummax()) - 1).min())
+                            return {
+                                "total_return": total_ret,
+                                "win_rate": win_rate,
+                                "total_trades": len(active),
+                                "sharpe_ratio": sharpe,
+                                "max_drawdown": max_dd
+                            }, equity
+
+                        raw_m, raw_eq = get_bt_stats(bt['Raw'], "Raw", interval)
+                        meta_m, meta_eq = get_bt_stats(bt['Meta'], "Meta", interval)
+                        bench_m, bench_eq = get_bt_stats(bt['Ret'], "Bench", interval)
+                        
+                        meta_results = {
+                            'raw_metrics': raw_m,
+                            'raw_equity': raw_eq,
+                            'raw_size': bt['Raw'], # approximation
+                            'meta_metrics': meta_m,
+                            'meta_equity': meta_eq,
+                            'meta_size': bt['Meta'], # approximation
+                            'buy_hold_equity': bench_eq,
+                            'meta_probs': pd.Series(meta_probs, index=X_test.index) if 'meta_probs' in locals() else pd.Series(0.5, index=X_test.index)
                         }
 
                 except Exception as e:
@@ -1731,7 +1790,7 @@ def predictive_server(input, output, session):
             # Layout update
             fig.update_layout(
                 height=700,
-                width=1490,
+                width=1470,
                 template="plotly_dark",
                 margin=dict(t=40, b=60, l=40, r=30),
                 paper_bgcolor="#0b3d91",
@@ -1750,132 +1809,6 @@ def predictive_server(input, output, session):
                 fig.update_xaxes(gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)", row=i, col=1)
 
             return fig
-
-        # Fallback to naive backtest
-        model = res['model']
-        X_test = res['X_test']
-        y_ret_test = res['y_ret_test']
-        meta_model = res['meta_model']
-        is_classification = res['is_classification']
-        
-        p = model.predict(X_test)
-        bt = pd.DataFrame({'Pred': p, 'Ret': y_ret_test}).sort_index()
-        bt.index = bt.index.strftime('%Y-%m-%d %H:%M')
-        
-        meta_sizing = np.ones(len(bt))
-        if meta_model is not None:
-            X_meta = pd.concat([X_test, pd.Series(p, index=X_test.index, name='primary_pred')], axis=1)
-            probs = meta_model.predict_proba(X_meta)
-            idx_1 = np.where(meta_model.classes_ == 1)[0]
-            if len(idx_1) > 0:
-                meta_probs = probs[:, idx_1[0]]
-                meta_sizing = meta_sizing_cal(meta_probs)
-        else:
-            meta_probs = np.full(len(bt), 0.5)
-        
-        bt['Size'] = meta_sizing
-        bt['Prob'] = meta_probs
-        bt['Signal'] = np.sign(bt['Pred']) if not is_classification else bt['Pred']
-
-        if is_classification:
-            bt['L_raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0)
-            bt['S_raw'] = np.where(bt['Pred'] == -1, -bt['Ret'], 0)
-        else:
-            bt['L_raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0)
-            bt['S_raw'] = np.where(bt['Pred'] < 0, -bt['Ret'], 0)
-            
-        bt['Both_raw'] = bt['L_raw'] + bt['S_raw']
-        bt['Both_meta'] = bt['Both_raw'] * bt['Size']
-
-        fig = make_subplots(
-            rows=3, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.04,
-            row_heights=[0.5, 0.25, 0.25]
-        )
-
-        perf_series = [
-            ("Both_raw", "Raw Signal", "#9AA0A6", 2, None),
-            ("Both_meta", "Meta Optimized", "#ff007f", 3, None),
-            ("Ret", "Benchmark", "#FFD700", 1.5, "dot"),
-        ]
-
-        for col, name, color, width, dash in perf_series:
-            fig.add_trace(
-                go.Scatter(
-                    x=bt.index,
-                    y=np.exp(bt[col].cumsum()) - 1,
-                    name=name,
-                    line=dict(color=color, width=width, dash=dash) if dash else dict(color=color, width=width)
-                ),
-                row=1, col=1
-            )
-
-        # Dummy trace for 0.5 fill
-        fig.add_trace(
-            go.Scatter(
-                x=bt.index,
-                y=np.full(len(bt), 0.5),
-                mode='lines',
-                line=dict(color='rgba(0,0,0,0)', width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            ),
-            row=2, col=1
-        )
-
-        # Prob row
-        fig.add_trace(
-            go.Scatter(
-                x=bt.index,
-                y=bt['Prob'],
-                name="Meta Prob",
-                line=dict(color="#f72585", width=2),
-                fill='tonexty',
-                fillcolor='rgba(247, 37, 133, 0.1)'
-            ),
-            row=2, col=1
-        )
-        fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(255,255,255,0.5)", row=2, col=1)
-
-        fig.add_trace(
-            go.Scatter(
-                x=bt.index,
-                y=bt['Signal'],
-                name="Signal",
-                line=dict(color="#4cc9f0", width=1),
-                opacity=0.5
-            ),
-            row=3, col=1
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=bt.index,
-                y=bt['Size'] * bt['Signal'],
-                name="Size",
-                line=dict(color="#72efdd", width=2)
-            ),
-            row=3, col=1
-        )
-
-        fig.update_layout(
-            height=700,
-            width=1400,
-            template="plotly_dark",
-            margin=dict(t=40, b=60, l=40, r=30),
-            paper_bgcolor="#0b3d91",
-            plot_bgcolor="#0b3d91",
-            font=dict(family="Space Mono", color="white"),
-            legend=dict(orientation="h", yanchor="top", y=-0.1, xanchor="center", x=0.5)
-        )
-
-        fig.update_yaxes(title_text="Returns", tickformat=".1%", row=1, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
-        fig.update_yaxes(title_text="Meta Prob", range=[0, 1], row=2, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
-        fig.update_yaxes(title_text="Signal/Size", row=3, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
-        fig.update_xaxes(gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
-
-        return fig
 
     @render_widget
     def predicted_label_chart():
@@ -1955,7 +1888,7 @@ def predictive_server(input, output, session):
         fig.update_layout(
             template="plotly_dark",
             height=550,
-            width=1490,
+            width=1470,
             margin=dict(t=50, b=80, l=40, r=40),
             xaxis_title="Time",
             yaxis_title="Price",
@@ -2283,63 +2216,7 @@ def predictive_server(input, output, session):
                 bench_m
             ])
         else:
-            # Fallback for empty results
-            # ... (the rest of the fallback code remains)
-            # Fallback to naive metrics
-            model = res['model']
-            X_test = res['X_test']
-            y_ret_test = res['y_ret_test']
-            meta_model = res['meta_model']
-            is_classification = res['is_classification']
-            
-            p = model.predict(X_test)
-            bt = pd.DataFrame({'Pred': p, 'Ret': y_ret_test}, index=X_test.index).sort_index()
-            
-            meta_sizing = np.ones(len(bt))
-            if meta_model is not None:
-                X_meta = pd.concat([X_test, pd.Series(p, index=X_test.index, name='primary_pred')], axis=1)
-                probs = meta_model.predict_proba(X_meta)
-                idx_1 = np.where(meta_model.classes_ == 1)[0]
-                if len(idx_1) > 0:
-                    meta_probs = probs[:, idx_1[0]]
-                    meta_sizing = meta_sizing_cal(meta_probs)
-            
-            if is_classification:
-                bt['Raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0) + np.where(bt['Pred'] == -1, -bt['Ret'], 0)
-            else:
-                bt['Raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0) + np.where(bt['Pred'] < 0, -bt['Ret'], 0)
-            
-            bt['Meta'] = bt['Raw'] * meta_sizing
-            
-            def get_stats(series, label):
-                ret = series.replace([np.inf, -np.inf], 0).fillna(0)
-                equity = np.exp(ret.cumsum())
-                total_ret = equity.iloc[-1] - 1
-                active = ret[ret != 0]
-                win_rate = (active > 0).sum() / len(active) if len(active) > 0 else 0
-                ann_factor = MetricsEngine.get_annual_scaling(res['interval'])
-                
-                std = ret.std()
-                if std > 1e-12:
-                    sharpe = (ret.mean() / std) * np.sqrt(ann_factor)
-                else:
-                    sharpe = 0.0
-                    
-                max_dd = abs(((equity / equity.cummax()) - 1).min()) * 100
-                return {
-                    "Strategy": label,
-                    "Total Profits": total_ret,
-                    "Win Rate": win_rate,
-                    "Trades": len(active) if label != "Benchmark" else 0,
-                    "Sharpe": sharpe if np.isfinite(sharpe) else 0.0,
-                    "Max Drawdown": max_dd if np.isfinite(max_dd) else 0.0
-                }
-            
-            df = pd.DataFrame([
-                get_stats(bt['Raw'], "Raw Signal"),
-                get_stats(bt['Meta'], "Meta Optimized"),
-                get_stats(bt['Ret'], "Benchmark")
-            ])
+            return None
         
         df = df.sort_values("Sharpe", ascending=False).reset_index(drop=True)
         

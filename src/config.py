@@ -45,28 +45,19 @@ BINANCE_URL = "https://www.binance.com/en/futures/"
 
 # --- METRIC LABELS ---
 METRIC_LABELS = {
-    'beta': 'Beta',
-    'alpha': 'Alpha',
     'volatility': 'Volatility',
-    'r_squared': 'R-Squared',
     'adf_hist': 'ADF Regime',
     'adf_stat': 'ADF Statistic',
-    'sharpe': 'Sharpe Ratio',
     'fip': 'FIP',
     'count': 'Data Points',
-    'return': 'Return',
-    'metric_return': 'Metric Return',
     'ewva': 'EWVA',
     'aroon_osc': 'Aroon Oscillator',
-    'bbp': 'BBP (Bollinger Position)',
     'rsi_norm': 'RSI (Normalized)',
-    'return_z': 'Return Z-Score',
     'atr_norm': 'Normalized ATR',
     'cmf': 'Chaikin Money Flow',
     'vwap_z': 'VWAP Z-Score',
     'rel_strength_z': 'Rel Strength Z-Score',
     'price_zscore': 'Price Z-Score',
-    'price_sma_diff': 'Price vs SMA %',
     'vam': 'VAM (Vol-Adj Momentum)',
     'skewness': 'Return Skewness',
     'sign_lag1': 'Sign Lag 1',
@@ -77,26 +68,30 @@ METRIC_LABELS = {
     'rolling_sign_lag20': 'Rolling Sign (20)',
     'autocorr_1': 'Autocorr (1)',
     'autocorr_5': 'Autocorr (5)',
-    'ewma': 'EWMA (Price Norm)',
     'imbalance_bar': 'Imbalance Bar',
     'vol_imbalance': 'Volatility Imbalance',
+    'volume_imbalance': 'Volume Imbalance',
+    'vol_atr': 'Vol/ATR Ratio',
     'vama': 'VAMA',
+    'liquidity_impact': 'Liquidity Impact',
+    'vol_rank': 'Volatility Rank',
     'None': 'None'
 }
 
 # List of all available numeric metrics for axes
 ALL_METRICS = [
-    'beta', 'alpha', 'volatility', 'sharpe', 'fip', 
-    'metric_return', 'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
-    'bbp', 'rsi_norm', 'return_z', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'price_sma_diff', 'vam', 'skewness',
+    'volatility', 'fip', 
+    'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
+    'rsi_norm', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'vam', 'skewness',
     'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20',
-    'autocorr_1', 'autocorr_5', 'ewma', 'imbalance_bar', 'vol_imbalance', 'vama'
+    'autocorr_1', 'autocorr_5', 'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank'
 ]
 
 DEFAULT_FEATURES = [
-    'volatility',
-    'ewva', 'vol_imbalance', 'vama',
-    'cmf', 'vwap_z', 'rsi_norm', 'vam', 'skewness',
-    'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag20',
-    'autocorr_5', 'ewma', 'imbalance_bar', 'vama', 'fip', 'aroon_osc'
+    'fip', 
+    'adf_hist', 'ewva', 'aroon_osc', 
+    'atr_norm', 'vol_atr', 'vama', 'cmf', 'price_zscore', 'vam', 'skewness',
+    'sign_lag1', 'sign_lag2', 'sign_lag3',
+    'autocorr_1', 'autocorr_5', 
+    'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank'
 ]

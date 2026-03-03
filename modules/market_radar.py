@@ -378,7 +378,7 @@ def market_radar_server(input, output, session, global_interval):
 
                 results = []
                 # Use a reasonable number of workers
-                with ThreadPoolExecutor(max_workers=50) as executor:
+                with ThreadPoolExecutor(max_workers=10) as executor:
                     # Submit all tasks (Excluding nothing during calculation for realtime filtering)
                     future_to_sym = {executor.submit(process_symbol, sym): sym for sym in symbols}
                     
@@ -494,7 +494,8 @@ def market_radar_server(input, output, session, global_interval):
         if z != "None" and z in plot_df.columns:
             plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0)
             # px.scatter size must be positive
-            plot_df['z_marker_size'] = plot_df[z].abs() + 5
+            z_norm = (plot_df[z] - plot_df[z].min()) / (plot_df[z].max() - plot_df[z].min())
+            plot_df['z_marker_size'] = z_norm * 15 + 5
             
             fig = px.scatter(
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
@@ -771,7 +772,7 @@ def market_radar_server(input, output, session, global_interval):
                                 'Y_Value': sy.values,
                                 'Symbol': sym,
                                 'Order': order,
-                                'Marker_Size': (order * 15 + 5)
+                                'Marker_Size': (order + 1)
                             }
                             combined_df = pd.concat([combined_df, pd.DataFrame(row_data)])
                     p.set(i + 1, detail=f"Trajectory for {sym}")
