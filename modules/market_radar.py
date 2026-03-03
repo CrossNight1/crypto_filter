@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO
+from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy import stats
@@ -100,7 +100,6 @@ def market_radar_ui():
                         placeholder="e.g. 20",
                         update_on="blur"
                     ),
-
                     ui.input_selectize(
                         "radar_symbols",
                         "Select Symbols",
@@ -132,7 +131,8 @@ def market_radar_ui():
                         )
                     )
                 )
-            )
+            ),
+            value="tab_radar"
         ),
         ui.nav_panel("Path Analysis",
             ui.layout_sidebar(
@@ -144,6 +144,13 @@ def market_radar_ui():
                         "btn_gen_rpg",
                         "Generate Path",
                         class_="btn-primary w-100 mb-2"
+                    ),
+
+                    ui.input_text(
+                        "rpg_focus_symbol",
+                        "Focus Symbol",
+                        value="",
+                        placeholder="e.g. BTCUSDT"
                     ),
 
                     ui.input_select(
@@ -184,7 +191,7 @@ def market_radar_ui():
                         ui.input_numeric(
                             "step_size",
                             "Stride",
-                            value=20,
+                            value=10,
                             min=1,
                             max=50
                         ),
@@ -200,6 +207,13 @@ def market_radar_ui():
 
                     ui.hr(class_="mt-2 mb-2"),
 
+                    ui.input_text(
+                        "n_assets_rpg",
+                        "Top Volume",
+                        value="5",
+                        placeholder="e.g. 20",
+                        update_on="blur"
+                    ),
                     ui.input_selectize(
                         "rpg_symbols",
                         "Compare Symbols",
@@ -232,8 +246,10 @@ def market_radar_ui():
                         )
                     )
                 )
-            )
-        )
+            ),
+            value="tab_rpg"
+        ),
+        id="radar_nav"
     )
 
 def market_radar_server(input, output, session, global_interval):
@@ -244,8 +260,12 @@ def market_radar_server(input, output, session, global_interval):
     rpg_data = reactive.Value(pd.DataFrame())
     selected_symbol_data = reactive.Value(None)
     
-    # Track selected symbols for snapshot
+    # Track selected symbols for snapshot and RPG
     selected_symbols_radar = reactive.Value(set())
+    selected_symbols_rpg = reactive.Value(set())
+    
+    # Track focus symbol for RPG specifically
+    selected_rpg_focus_data = reactive.Value(None)
 
     logger.log("Market Radar", "INFO", "Server initialized")
 
@@ -263,39 +283,60 @@ def market_radar_server(input, output, session, global_interval):
             n = int(input.n_assets_radar() or 20)
             syms = manager.fetcher.get_top_volume_symbols(top_n=n)
             new_syms = set(MANDATORY_CRYPTO).union(syms)
+            # Remove ignored symbols
+            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
+            
+            # This triggers the effect above to update selected_symbols_radar
+            ui.update_text("n_assets_radar", value=str(n)) 
             selected_symbols_radar.set(new_syms)
             
-            interval = input.radar_interval()
-            inventory = manager.get_inventory()
-            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            all_syms = manager.get_universe()
             ui.update_selectize("radar_symbols", choices=all_syms, selected=sorted(list(new_syms)))
         except:
             pass
 
     @reactive.effect
-    def _populate_radar_on_tab():
+    @reactive.event(input.n_assets_rpg)
+    def _update_rpg_symbols_list():
+        try:
+            val = input.n_assets_rpg()
+            n = int(val) if val else 20
+            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            new_syms = set(MANDATORY_CRYPTO).union(syms)
+            # Remove ignored symbols
+            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
+            
+            # This triggers the effect above to update selected_symbols_rpg
+            ui.update_text("n_assets_rpg", value=str(n))
+            selected_symbols_rpg.set(new_syms)
+            
+            all_syms = manager.get_universe()
+            ui.update_selectize("rpg_symbols", choices=all_syms, selected=sorted(list(new_syms)))
+        except:
+            pass
+
+
+    @reactive.effect
+    def _populate_symbols_on_tab():
         try:
             if input.main_nav() == "MARKET_RADAR":
-                _update_radar_symbols_list()
+                if input.radar_nav() == "tab_rpg":
+                    _update_rpg_symbols_list()
+                else:
+                    _update_radar_symbols_list()
         except:
             pass
 
     @reactive.effect
     @reactive.event(input.radar_interval, ignore_init=True)
     def _update_symbol_choices():
-        interval = input.radar_interval()
-        inventory = manager.get_inventory()
-        if not inventory:
-            return
-            
-        available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+        all_syms = manager.get_universe()
         curr_sel = sorted(list(selected_symbols_radar.get()))
-        
-        ui.update_selectize("radar_symbols", choices=available_syms, selected=curr_sel)
+        ui.update_selectize("radar_symbols", choices=all_syms, selected=curr_sel)
 
     @reactive.effect
     @reactive.event(input.btn_calc_snapshot)
-    def _handle_top_volume_and_sync():
+    def _handle_radar_sync():
         # Strictly gate both symbol population and data syncing behind the button
         try:
             val = input.n_assets_radar()
@@ -310,12 +351,14 @@ def market_radar_server(input, output, session, global_interval):
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
             new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
             syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            # Filter ignored
+            syms = [s for s in syms if s not in IGNORED_CRYPTO]
+            
             selected_symbols_radar.set(set(syms))
             
             # 2. Update UI
-            inventory = manager.get_inventory()
-            sym_choices = sorted([s for s, ints in inventory.items() if interval in ints])
-            ui.update_selectize("radar_symbols", choices=sym_choices, selected=syms)
+            all_syms = manager.get_universe()
+            ui.update_selectize("radar_symbols", choices=all_syms, selected=syms)
             
             # 3. Sync data for these symbols (if needed/optional)
             p.set(20, message="Syncing data...", detail="Ensuring cache is up-to-date")
@@ -325,11 +368,49 @@ def market_radar_server(input, output, session, global_interval):
             p.set(100, message="Sync complete")
 
     @reactive.effect
+    @reactive.event(input.btn_gen_rpg)
+    def _handle_rpg_sync():
+        # Strictly gate both symbol population and data syncing behind the button
+        try:
+            val = input.n_assets_rpg()
+            n_assets = int(val) if val else 20
+        except ValueError:
+            n_assets = 20
+            
+        interval = input.rpg_interval()
+        
+        with ui.Progress(min=0, max=100) as p:
+            # 1. Populate Symbols
+            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
+            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
+            selected_symbols_rpg.set(set(syms))
+            
+            # 2. Update UI
+            all_syms = manager.get_universe()
+            ui.update_selectize("rpg_symbols", choices=all_syms, selected=syms)
+            
+            # 3. Sync data for these symbols (if needed/optional)
+            p.set(20, message="Syncing data...", detail="Ensuring cache is up-to-date")
+            # In Market Radar, we typically load on-demand during calculation, 
+            # but we can do a quick check here if desired.
+            
+            p.set(100, message="Sync complete")
+
+
+    @reactive.effect
     def _sync_focus_symbol():
         """Sync focus_symbol input with selected_symbol_data"""
         symbol = input.focus_symbol().strip().upper()
         if symbol:
             selected_symbol_data.set(symbol)
+
+    @reactive.effect
+    def _sync_rpg_focus_symbol():
+        """Sync rpg_focus_symbol input with selected_rpg_focus_data"""
+        symbol = input.rpg_focus_symbol().strip().upper()
+        if symbol:
+            selected_rpg_focus_data.set(symbol)
 
     @reactive.effect
     @reactive.event(input.btn_calc_snapshot)
@@ -339,7 +420,6 @@ def market_radar_server(input, output, session, global_interval):
             interval = input.radar_interval()
             logger.log("Market Radar", "INFO", f"Using interval: {interval}")
             
-            inventory = manager.get_inventory()
             symbols = list(input.radar_symbols())
             logger.log("Market Radar", "INFO", f"Calculating metrics for {len(symbols)} symbols")
             
@@ -383,7 +463,7 @@ def market_radar_server(input, output, session, global_interval):
                     future_to_sym = {executor.submit(process_symbol, sym): sym for sym in symbols}
                     
                     # Process as they complete to update progress bar
-                    for i, future in enumerate(as_completed(future_to_sym)):
+                    for i, future in enumerate(future_to_sym):
                         sym = future_to_sym[future]
                         try:
                             single_res = future.result()
@@ -716,14 +796,12 @@ def market_radar_server(input, output, session, global_interval):
         
         return ui.HTML(metrics_html)
 
-    @reactive.effect
-    @reactive.event(input.rpg_interval, ignore_init=True)
-    def _update_rpg_symbols():
-        # This only updates the UI choices, doesn't fetch data
-        interval = input.rpg_interval()
-        inventory = manager.get_inventory()
-        available_syms = sorted([s for s, ints in inventory.items() if interval in ints])
-        ui.update_selectize("rpg_symbols", choices=available_syms, selected=MANDATORY_CRYPTO, server=True)
+    @reactive.Effect
+    def _populate_initial_symbols():
+        # Use centralized universe instead of local inventory
+        all_syms = manager.get_universe()
+        ui.update_selectize("radar_symbols", choices=all_syms, selected=MANDATORY_CRYPTO, server=True)
+        ui.update_selectize("rpg_symbols", choices=all_syms, selected=MANDATORY_CRYPTO, server=True)
 
     @reactive.effect
     @reactive.event(input.btn_gen_rpg)
@@ -743,44 +821,97 @@ def market_radar_server(input, output, session, global_interval):
             x_metric = input.rpg_x()
             y_metric = input.rpg_y()
             
+            # 1. Pre-sync data for all selected symbols to ensure local cache is ready
+            with ui.Progress(min=0, max=len(compare_symbols)) as p:
+                p.set(message="Synchronizing data...", detail="Fetching latest candles")
+                for i, sym in enumerate(compare_symbols):
+                    # This ensures data is on disk before we hit the parallel block
+                    manager.load_data(sym, interval, auto_sync=True)
+                    p.set(i + 1)
+                    await reactive.flush()
+
+            # 2. Parallel Calculation
             with ui.Progress(min=0, max=len(compare_symbols)) as p:
                 p.set(message="Calculating trajectories...")
                 combined_df = pd.DataFrame()
-                window_size = step_size * max_points + 1
+                window_size = filter_window = input.filter_window()
                 
-                for i, sym in enumerate(compare_symbols):
-                    # DataManager.load_data now uses LRU cache
-                    df = manager.load_data(sym, interval)
-                    if df is not None and not df.empty:
-                        key_x = get_metric_key(x_metric)
-                        key_y = get_metric_key(y_metric)
-                        
-                        sx = engine.calculate_rolling_metric(df, key_x, window=window_size, step=step_size, interval=interval)
-                        sy = engine.calculate_rolling_metric(df, key_y, window=window_size, step=step_size, interval=interval)
-                        
-                        if not sx.dropna().empty and not sy.dropna().empty:
-                            common_idx = sx.index.intersection(sy.index)
-                            sx, sy = sx.loc[common_idx], sy.loc[common_idx]
+                # Pre-map display labels to internal keys
+                key_x = get_metric_key(x_metric)
+                key_y = get_metric_key(y_metric)
+                required_metrics = list(set([key_x, key_y]))
+
+                def process_rpg_symbol(sym):
+                    try:
+                        # Use auto_sync=False because we pre-synced above
+                        df = manager.load_data(sym, interval, auto_sync=False)
+                        if df is not None and not df.empty:
+                            # Standardize and clean in one go
+                            df['close'] = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(0)
                             
-                            if len(sx) > max_points:
-                                sx, sy = sx.iloc[-max_points:], sy.iloc[-max_points:]
+                            # Calculate exactly what we need
+                            inds = engine.calculate_all_indicators(
+                                df, 
+                                window=window_size, 
+                                interval=interval,
+                                include_metrics=required_metrics
+                            )
+                            
+                            if key_x in inds.columns and key_y in inds.columns:
+                                sx = inds[key_x]
+                                sy = inds[key_y]
                                 
-                            # Build trajectory rows
-                            order = np.linspace(0.2, 1.0, len(sx))
-                            row_data = {
-                                'X_Value': sx.values,
-                                'Y_Value': sy.values,
-                                'Symbol': sym,
-                                'Order': order,
-                                'Marker_Size': (order + 1)
-                            }
-                            combined_df = pd.concat([combined_df, pd.DataFrame(row_data)])
-                    p.set(i + 1, detail=f"Trajectory for {sym}")
-                    await reactive.flush()
+                                # Sample points from the end with step_size gap
+                                # e.g. if max_points=3, step_size=20 -> indices: -1, -21, -41
+                                valid_sx = sx.dropna()
+                                valid_sy = sy.dropna()
+                                common_idx = valid_sx.index.intersection(valid_sy.index)
+                                
+                                if len(common_idx) >= 1:
+                                    # Pick indices from the end
+                                    indices = []
+                                    for i in range(max_points):
+                                        idx = -(1 + i * step_size)
+                                        if abs(idx) <= len(common_idx):
+                                            indices.append(common_idx[idx])
+                                    
+                                    # Chronological order
+                                    indices = indices[::-1]
+                                    sx, sy = sx.loc[indices], sy.loc[indices]
+                                        
+                                    # Build trajectory rows
+                                    order = np.linspace(0.2, 1.0, len(sx))
+                                    return pd.DataFrame({
+                                        'X_Value': sx.values,
+                                        'Y_Value': sy.values,
+                                        'Symbol': sym,
+                                        'Order': order,
+                                        'Marker_Size': (order + 1) * 8
+                                    })
+                    except Exception as e:
+                        logger.log("Market Radar", "ERROR", f"Error in RPG process for {sym}: {e}")
+                    return None
+
+                results = []
+                # Use a larger worker pool for I/O bound load_data (though it's partially pre-cached now)
+                # and CPU bound metric calcs.
+                with ThreadPoolExecutor(max_workers=15) as executor:
+                    future_to_sym = {executor.submit(process_rpg_symbol, sym): sym for sym in compare_symbols}
+                    for i, future in enumerate(as_completed(future_to_sym)):
+                        sym = future_to_sym[future]
+                        res = future.result()
+                        if res is not None:
+                            results.append(res)
+                        p.set(i + 1, detail=f"Processed {sym}")
+                        await reactive.flush()
                 
-                logger.log("Market Radar", "INFO", f"Trajectory gen complete. Total rows: {len(combined_df)}")
-                rpg_data.set(combined_df)
-                ui.notification_show("Trajectory update complete!", type="success")
+                if results:
+                    combined_df = pd.concat(results)
+                    logger.log("Market Radar", "INFO", f"Trajectory gen complete. Total rows: {len(combined_df)}")
+                    rpg_data.set(combined_df)
+                    ui.notification_show("Trajectory update complete!", type="success")
+                else:
+                    ui.notification_show("No trajectory data generated", type="warning")
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"RPG error: {str(e)}")
             ui.notification_show(f"RPG calculation failed: {str(e)}", type="error")
@@ -796,30 +927,15 @@ def market_radar_server(input, output, session, global_interval):
         df = rpg_data.get()
         if df.empty: return go.Figure()
         
+        focus_sym = input.rpg_focus_symbol().strip().upper()
+        has_focus = focus_sym in df['Symbol'].str.upper().values
+        
         fig = px.line(
             df, x='X_Value', y='Y_Value', color='Symbol',
+            markers=True,
             log_x=input.rpg_x_log(), log_y=input.rpg_y_log(),
             template="plotly_dark", line_shape='spline'
         )
-        # Add markers for status
-        # First, build a color map from the line traces
-        symbol_colors = {}
-        for trace in fig.data:
-            if isinstance(trace, go.Scatter) and trace.name in df['Symbol'].unique():
-                symbol_colors[trace.name] = trace.line.color
-
-        for sym in df['Symbol'].unique():
-            sym_df = df[df['Symbol'] == sym]
-            fig.add_trace(go.Scatter(
-                x=sym_df['X_Value'], y=sym_df['Y_Value'],
-                mode='markers',
-                marker=dict(
-                    size=sym_df['Marker_Size'], 
-                    opacity=sym_df['Order'],
-                    color=symbol_colors.get(sym) # Match line color
-                ),
-                name=sym, showlegend=False
-            ))
         
         # Hide legend and set proper axis titles
         x_label = METRIC_LABELS.get(input.rpg_x(), input.rpg_x())
@@ -827,15 +943,57 @@ def market_radar_server(input, output, session, global_interval):
         
         fig.update_layout(
             showlegend=False,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin=dict(l=50, r=50, t=50, b=50),
             xaxis_title=x_label,
             yaxis_title=y_label,
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
+            height=600,
+            width=1470,
             font=dict(family="Space Mono", color="white"),
             xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)"),
             yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
         )
+
+        for trace in fig.data:
+            if not isinstance(trace, go.Scatter) or trace.name not in df['Symbol'].unique():
+                continue
+                
+            is_focus = has_focus and trace.name.upper() == focus_sym
+                
+            # Line Styling
+            if has_focus:
+                trace.line.width = 4 if is_focus else 1
+                trace.opacity = 1.0 if is_focus else 0.15
+            else:
+                trace.line.width = 2
+                trace.opacity = 0.8
+
+            # Marker Styling
+            sym_df = df[df['Symbol'] == trace.name]
+            trace.marker.size = sym_df['Marker_Size'] * (1.5 if is_focus else 1.0)
+            trace.marker.opacity = sym_df['Order'] * (trace.opacity)
+            
+            if is_focus:
+                trace.marker.line = dict(color='white', width=1)
+                
+                # Add a distinct star marker for the latest point
+                fig.add_trace(go.Scatter(
+                    x=[sym_df['X_Value'].iloc[-1]], 
+                    y=[sym_df['Y_Value'].iloc[-1]],
+                    mode='markers+text',
+                    text=[trace.name],
+                    textposition="top right",
+                    marker=dict(
+                        size=18,
+                        color=trace.line.color,
+                        line=dict(color='white', width=2),
+                        symbol='star'
+                    ),
+                    name=f"{trace.name} Focus",
+                    showlegend=False
+                ))
+        
         return fig
 
 def get_metric_key(m):

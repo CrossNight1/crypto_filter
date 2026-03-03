@@ -705,30 +705,20 @@ def predictive_server(input, output, session):
 
     @reactive.effect
     def _():
-        inv = manager.get_inventory()
-        inventory.set(inv)
+        uni = manager.get_universe()
+        inventory.set(uni)
 
     @render.ui
     def symbol_selection_ui():
-        inv = inventory.get()
-        if not inv: 
-            return ui.div(ui.p("No data found. Sync symbols in Data Loader first.", class_="text-danger small mt-2"))
+        uni = inventory.get()
+        if not uni: 
+            return ui.div(ui.p("Loading symbol universe...", class_="text-info small mt-2"))
         
-        # Filter tickers by selected interval
-        interval = input.interval()
-        if interval:
-            tickers = sorted([sym for sym, intervals in inv.items() if interval in intervals])
-        else:
-            tickers = sorted(list(inv.keys()))
-        
-        return ui.input_select("selected_ticker", "Symbol", choices=tickers, selected='BTCUSDT')
+        return ui.input_select("selected_ticker", "Symbol", choices=uni, selected='BTCUSDT')
 
     @reactive.effect
     def _():
-        inv = inventory.get()
-        if not inv: return
-        intervals = sorted(list(set(i for ivs in inv.values() for i in ivs)))
-        ui.update_select("interval", choices=intervals, selected='1h' if '1h' in intervals else intervals[0])
+        ui.update_select("interval", choices=AVAILABLE_INTERVALS, selected='1h' if '1h' in AVAILABLE_INTERVALS else AVAILABLE_INTERVALS[0])
 
     @render.ui
     def model_select_ui():

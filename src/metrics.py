@@ -130,7 +130,7 @@ class MetricsEngine:
         return pd.Series(res, index=close.index)
 
     @staticmethod
-    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, interval: str = '1h') -> pd.DataFrame:
+    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Calculates all 11 advanced metrics requested by the user.
         Returns a DataFrame with the same index as the input df.
@@ -149,99 +149,132 @@ class MetricsEngine:
         # Core returns calculation
         ret = close.pct_change()
 
+        def should_calc(m):
+            return include_metrics is None or m in include_metrics
+
         # 1. EWVA: (EMA_fast - EMA_slow) / STD(price)
-        ema_f = MetricsEngine.ema(close, w_short)
-        ema_s = MetricsEngine.ema(close, w_slow)
-        std_p = close.ewm(span=window).std()
-        res['ewva'] = (ema_f - ema_s) / std_p
+        if should_calc('ewva') or should_calc('vol_rank') or should_calc('vwap_z'):
+            std_p = close.ewm(span=window).std()
+            
+        if should_calc('ewva'):
+            ema_f = MetricsEngine.ema(close, w_short)
+            ema_s = MetricsEngine.ema(close, w_slow)
+            res['ewva'] = (ema_f - ema_s) / std_p
         
         # 2. Aroon Oscillator: (AroonUp - AroonDown) / 100
-        au, ad = MetricsEngine.aroon(high, low, w_mid)
-        res['aroon_osc'] = (au - ad) / 100
+        if should_calc('aroon_osc'):
+            au, ad = MetricsEngine.aroon(high, low, w_mid)
+            res['aroon_osc'] = (au - ad) / 100
         
         # 4. RSI (Normalized): RSI / 100
-        res['rsi_norm'] = (MetricsEngine.rsi(close, window) - 50) / 100
+        if should_calc('rsi_norm'):
+            res['rsi_norm'] = (MetricsEngine.rsi(close, window) - 50) / 100
                 
         # 6. Normalized ATR: ATR / Close
-        res['atr_norm'] = MetricsEngine.atr(high, low, close, w_short) / close.replace(0, 1e-9)
+        if should_calc('atr_norm') or should_calc('vam') or should_calc('vol_atr'):
+            atr_s = MetricsEngine.atr(high, low, close, w_short)
+            atr_norm = atr_s / close.replace(0, 1e-9)
+            if should_calc('atr_norm'):
+                res['atr_norm'] = atr_norm
         
         # 7. Chaikin Money Flow (CMF)
-        mfm = ((close - low) - (high - close)) / (high - low).replace(0, 1e-9)
-        mfv = mfm * volume
-        res['cmf'] = mfv.ewm(span=window).sum() / volume.ewm(span=window).sum()
+        if should_calc('cmf'):
+            mfm = ((close - low) - (high - close)) / (high - low).replace(0, 1e-9)
+            mfv = mfm * volume
+            res['cmf'] = mfv.ewm(span=window).sum() / volume.ewm(span=window).sum()
         
         # 8. VWAP Deviation Z-Score: (Close - VWAP) / STD(price)
-        vwp = MetricsEngine.vwap(df)
-        res['vwap_z'] = (close - vwp) / std_p
+        if should_calc('vwap_z'):
+            vwp = MetricsEngine.vwap(df)
+            res['vwap_z'] = (close - vwp) / std_p
         
         # 9. Relative Strength Z-Score (vs benchmark)
-        if benchmark_returns is not None:
-            # Align indices
-            common_idx = ret.index.intersection(benchmark_returns.index)
-            diff = ret.loc[common_idx] - benchmark_returns.loc[common_idx]
-            res['rel_strength_z'] = (diff - diff.ewm(span=window).mean()) / diff.ewm(span=window).std()
-        else:
-            res['rel_strength_z'] = np.nan
+        if should_calc('rel_strength_z'):
+            if benchmark_returns is not None:
+                # Align indices
+                common_idx = ret.index.intersection(benchmark_returns.index)
+                diff = ret.loc[common_idx] - benchmark_returns.loc[common_idx]
+                res['rel_strength_z'] = (diff - diff.ewm(span=window).mean()) / diff.ewm(span=window).std()
+            else:
+                res['rel_strength_z'] = np.nan
             
         # 10. Volatility-Adjusted Momentum (VAM): ROC / (ATR / Close)
-        roc = close.pct_change(w_short)
-        atr_norm = res['atr_norm']
-        res['vam'] = roc / atr_norm
+        if should_calc('vam'):
+            roc = close.pct_change(w_short)
+            res['vam'] = roc / atr_norm
         
         # 11. Return Skewness (Rolling)
-        res['skewness'] = ret.rolling(window).skew()
+        if should_calc('skewness'):
+            res['skewness'] = ret.rolling(window).skew()
         
         # 12. Lagged Signs
-        res['sign_lag1'] = np.sign(ret.shift(1))
-        res['sign_lag2'] = np.sign(ret.shift(2))
-        res['sign_lag3'] = np.sign(ret.shift(3))
+        if should_calc('sign_lag1'): res['sign_lag1'] = np.sign(ret.shift(1))
+        if should_calc('sign_lag2'): res['sign_lag2'] = np.sign(ret.shift(2))
+        if should_calc('sign_lag3'): res['sign_lag3'] = np.sign(ret.shift(3))
 
         # 13. Rolling lagged sign
-        res['rolling_sign_lag5'] = np.sign(ret.rolling(5).mean())
-        res['rolling_sign_lag10'] = np.sign(ret.rolling(10).mean())
-        res['rolling_sign_lag20'] = np.sign(ret.rolling(20).mean())
+        if should_calc('rolling_sign_lag5'): res['rolling_sign_lag5'] = np.sign(ret.rolling(5).mean())
+        if should_calc('rolling_sign_lag10'): res['rolling_sign_lag10'] = np.sign(ret.rolling(10).mean())
+        if should_calc('rolling_sign_lag20'): res['rolling_sign_lag20'] = np.sign(ret.rolling(20).mean())
 
-        # 14. Autocorrelation
-        res['autocorr_1'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
-        res['autocorr_5'] = ret.rolling(20).apply(lambda x: x.autocorr(lag=5) if len(x) == 20 else np.nan, raw=False)
+        # 14. Autocorrelation - Optimization: use pd.Series.autocorr only if explicitly needed and small window
+        if should_calc('autocorr_1'):
+            res['autocorr_1'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
+        if should_calc('autocorr_5'):
+            res['autocorr_5'] = ret.rolling(20).apply(lambda x: x.autocorr(lag=5) if len(x) == 20 else np.nan, raw=False)
         
         # 15. Imbalance Bar
-        body = (close - df['open']).abs()
-        rng = (high - low).replace(0, 1e-9)
-        res['imbalance_bar'] = (body / rng) * np.sign(close - df['open'])
+        if should_calc('imbalance_bar'):
+            body = (close - df['open']).abs()
+            rng = (high - low).replace(0, 1e-9)
+            res['imbalance_bar'] = (body / rng) * np.sign(close - df['open'])
         
         # 16. VAMA (Volatility Adjusted Moving Average)
-        res['vama'] = MetricsEngine.vama(close, w_short, w_slow) / close
+        if should_calc('vama'):
+            res['vama'] = MetricsEngine.vama(close, w_short, w_slow) / close
         
         # --- Standard/Legacy Metrics for Snapshot/Table use ---
-        ann_factor = MetricsEngine.get_annual_scaling(interval)
+        if should_calc('volatility') or should_calc('vol_atr'):
+            ann_factor = MetricsEngine.get_annual_scaling(interval)
+            vol_series = ret.ewm(span=window).std() * np.sqrt(ann_factor)
+            if should_calc('volatility'): res['volatility'] = vol_series
+            if should_calc('vol_atr'): res['vol_atr'] = vol_series / atr_norm
+
+        if should_calc('vol_imbalance'):
+            res['vol_imbalance'] = ret.ewm(span=w_short).std() / ret.ewm(span=w_slow).std()
         
-        # Sharpe & Volatility
-        res['volatility'] = ret.ewm(span=window).std() * np.sqrt(ann_factor)
-        res['vol_imbalance'] = ret.ewm(span=w_short).std() / ret.ewm(span=w_slow).std()
-        res['volume_imbalance'] = volume.ewm(span=w_short).std() / volume.ewm(span=w_slow).std()
-        res['liquidity_impact'] = ret.abs().ewm(span=window).mean() / volume.ewm(span=window).mean()
-        vol = ret.rolling(window).std()
-        res['vol_rank'] = vol.rolling(window).apply(lambda x: (x <= x.iloc[-1]).mean())
-        res['vol_atr'] = res['volatility'] / res['atr_norm']
+        if should_calc('volume_imbalance'):
+            res['volume_imbalance'] = volume.ewm(span=w_short).std() / volume.ewm(span=w_slow).std()
+            
+        if should_calc('liquidity_impact'):
+            res['liquidity_impact'] = ret.abs().ewm(span=window).mean() / volume.ewm(span=window).mean()
         
-        # FIP (Frog-in-the-Pan)
-        def fip_func(x):
-            total_ret = np.sum(x)
-            sign_ret = np.sign(total_ret)
-            n = len(x)
-            neg_pct = np.sum(x < 0) / n
-            pos_pct = np.sum(x > 0) / n
-            return sign_ret * (neg_pct - pos_pct)
-        res['fip'] = ret.rolling(window).apply(fip_func, raw=True)
+        if should_calc('vol_rank'):
+            vol = ret.rolling(window).std()
+            res['vol_rank'] = vol.rolling(window).apply(lambda x: (x <= x.iloc[-1]).mean())
+        
+        # 228. FIP (Frog-in-the-Pan)
+        if should_calc('fip'):
+            def fip_func(x):
+                total_ret = np.sum(x)
+                sign_ret = np.sign(total_ret)
+                n = len(x)
+                neg_pct = np.sum(x < 0) / n
+                pos_pct = np.sum(x > 0) / n
+                return sign_ret * (neg_pct - pos_pct)
+            res['fip'] = ret.rolling(window).apply(fip_func, raw=True)
         
         # Price Z-Score & SMA Diff
-        res['price_zscore'] = (close - close.rolling(window=window).mean()) / close.rolling(window=window).std()
+        if should_calc('price_zscore'):
+            res['price_zscore'] = (close - close.rolling(window=window).mean()) / close.rolling(window=window).std()
         
         # ADF Statistics
-        hist, tau, _ = MetricsEngine.calculate_custom_adf_series(close.values, lookback=window)
-        res['adf_hist'] = hist.values
-        res['adf_stat'] = tau.values
+        if should_calc('adf_hist') or should_calc('adf_stat'):
+            hist, tau, _ = MetricsEngine.calculate_custom_adf_series(close.values, lookback=window)
+            if should_calc('adf_hist'): res['adf_hist'] = hist.values
+            if should_calc('adf_stat'): res['adf_stat'] = tau.values
+
+        return res
 
         return res
 

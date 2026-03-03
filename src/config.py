@@ -32,6 +32,7 @@ This application allows you to analyze Binance Perpetual Futures with advanced s
 # --- DATA SETTINGS ---
 # Symbols that are always fetched
 MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'METISUSDT', 'BTCDOMUSDT']
+IGNORED_CRYPTO = ['PAXGUSDT', 'XAUUSDT', 'XAGUSDT']
 
 # Benchmark used for Relative Strength and Beta
 BENCHMARK_SYMBOL = 'BTCUSDT'

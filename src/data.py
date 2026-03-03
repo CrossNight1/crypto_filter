@@ -13,7 +13,7 @@ from typing import List, Optional, Union, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import from config
-from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET
+from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET, IGNORED_CRYPTO
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -45,21 +45,17 @@ class BinanceFuturesFetcher:
         if exclude is None:
             exclude = ['USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'USTUSDT', 'FDUSDUSDT']
             
+        # Add IGNORED_CRYPTO to exclude list
+        if IGNORED_CRYPTO:
+            exclude = list(set(exclude + IGNORED_CRYPTO))
+            
         data = self._request(self.TICKER_24H)
         if not data: return []
         
         df = pd.DataFrame(data)
-        # Filter for keys that look like symbols if needed, but the endpoint returns valid symbol objects
-        # We need to filter only PERPETUAL but 24hr ticker doesn't have contractType.
-        # So we fetch exchange info first usually, or just assume standard naming and filter later.
-        # Optimally: Fetch exchange info to filter PERPETUAL, then merge.
-        
-        # Quick filter: 
         df['quoteVolume'] = pd.to_numeric(df['quoteVolume'])
         df = df.sort_values('quoteVolume', ascending=False)
         
-        # Simple heuristic or double check with exchange info if strictness required.
-        # Detailed implementation:
         top_symbols = []
         for _, row in df.iterrows():
             sym = row['symbol']
@@ -77,8 +73,10 @@ class BinanceFuturesFetcher:
             
         symbols = []
         for s in info['symbols']:
-            if s['symbol'].endswith('USDT') and s['status'] == 'TRADING':
-                symbols.append(s['symbol'])
+            sym = s['symbol']
+            if sym.endswith('USDT') and s['status'] == 'TRADING':
+                if sym not in IGNORED_CRYPTO:
+                    symbols.append(sym)
         return sorted(symbols)
 
     def fetch_klines(self, symbol: str, interval: str, start_time: int = None, end_time: int = None, limit: int = None) -> pd.DataFrame:
@@ -219,6 +217,24 @@ class DataManager:
         self._cache_size = cache_size
         self.fetcher = BinanceFuturesFetcher()
         self._last_sync = {}
+        self._universe_cache = None
+        self._last_universe_fetch = 0
+        
+    def get_universe(self, top_n: int = 1000) -> List[str]:
+        """Returns top N symbols by volume, cached for 10 minutes session-wide."""
+        now = time.time()
+        if self._universe_cache is not None and (now - self._last_universe_fetch < 600):
+            return self._universe_cache
+            
+        try:
+            # Fetch absolute all or up to 1000
+            syms = self.fetcher.get_top_volume_symbols(top_n=top_n)
+            self._universe_cache = syms
+            self._last_universe_fetch = now
+            return syms
+        except Exception as e:
+            logger.error(f"Failed to fetch universe: {e}")
+            return MANDATORY_CRYPTO # Fallback
         
     def _get_path(self, symbol: str, interval: str) -> str:
         return os.path.join(self.data_dir, f"{symbol}_{interval}.parquet")

@@ -138,8 +138,7 @@ def server(input, output, session):
     
     @reactive.Effect
     def populate_symbols():
-        inventory = manager.get_inventory()
-        all_syms = sorted(inventory.keys())
+        all_syms = manager.get_universe()
         ui.update_selectize("diag_symbol", choices=all_syms, server=True)
         
         # Set benchmark/global timestamps once

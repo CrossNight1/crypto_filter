@@ -9,7 +9,7 @@ import plotly.figure_factory as ff
 from src.data import DataManager
 from ml_engine.analysis.correlation import CorrelationEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
-from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO
+from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _sanitize(data):
@@ -212,11 +212,10 @@ def multivariate_analysis_server(input, output, session):
             n = int(val)
             syms = manager.fetcher.get_top_volume_symbols(top_n=n)
             new_syms = set(MANDATORY_CRYPTO).union(syms)
+            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
             selected_symbols_corr.set(new_syms)
             
-            interval = input.corr_interval()
-            inventory = manager.get_inventory()
-            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            all_syms = manager.get_universe()
             ui.update_selectize("corr_symbols", choices=all_syms, selected=sorted(list(new_syms)))
         except:
             pass
@@ -230,11 +229,10 @@ def multivariate_analysis_server(input, output, session):
             n = int(val)
             syms = manager.fetcher.get_top_volume_symbols(top_n=n)
             new_syms = set(MANDATORY_CRYPTO).union(syms)
+            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
             selected_symbols_decomp.set(new_syms)
             
-            interval = input.decomp_interval()
-            inventory = manager.get_inventory()
-            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            all_syms = manager.get_universe()
             ui.update_selectize("decomp_symbols", choices=all_syms, selected=sorted(list(new_syms)))
         except:
             pass
@@ -265,20 +263,14 @@ def multivariate_analysis_server(input, output, session):
     @reactive.effect
     @reactive.event(input.corr_interval, input.decomp_interval)
     def _update_symbol_choices():
-        # React to interval changes but preserve or update selections based on inventory
-        inventory = manager.get_inventory()
-        if not inventory:
-            return
-            
-        corr_int = input.corr_interval()
-        all_syms_corr = sorted([s for s, ints in inventory.items() if corr_int in ints])
-        curr_sel_corr = sorted(list(selected_symbols_corr.get()))
-        ui.update_selectize("corr_symbols", choices=all_syms_corr, selected=curr_sel_corr)
+        # Preserving selection while refreshing universe choices
+        all_syms = manager.get_universe()
         
-        decomp_int = input.decomp_interval()
-        all_syms_decomp = sorted([s for s, ints in inventory.items() if decomp_int in ints])
+        curr_sel_corr = sorted(list(selected_symbols_corr.get()))
+        ui.update_selectize("corr_symbols", choices=all_syms, selected=curr_sel_corr)
+        
         curr_sel_decomp = sorted(list(selected_symbols_decomp.get()))
-        ui.update_selectize("decomp_symbols", choices=all_syms_decomp, selected=curr_sel_decomp)
+        ui.update_selectize("decomp_symbols", choices=all_syms, selected=curr_sel_decomp)
         
     # ── Helper: load return data ──────────────────────────────
 
@@ -347,10 +339,10 @@ def multivariate_analysis_server(input, output, session):
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
             top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
             syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
+            syms = [s for s in syms if s not in IGNORED_CRYPTO]
             selected_symbols_corr.set(set(syms))
             
-            inventory = manager.get_inventory()
-            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            all_syms = manager.get_universe()
             ui.update_selectize("corr_symbols", choices=all_syms, selected=syms)
 
             p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
@@ -543,10 +535,11 @@ def multivariate_analysis_server(input, output, session):
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
             top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
             syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
+            syms = [s for s in syms if s not in IGNORED_CRYPTO]
             selected_symbols_decomp.set(set(syms))
             
-            inventory = manager.get_inventory()
-            all_syms = sorted([s for s, ints in inventory.items() if interval in ints])
+            # Use universe for choices
+            all_syms = manager.get_universe()
             ui.update_selectize("decomp_symbols", choices=all_syms, selected=syms)
 
             p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
@@ -942,8 +935,8 @@ def multivariate_analysis_server(input, output, session):
                 # Use inverse weight for distance if possible, or just connectivity
                 G_layout.add_edge(edge['source'], edge['target'], weight=edge['weight'])
 
-            # pos = nx.spring_layout(G_layout, k=1/np.sqrt(len(labels)), iterations=100, seed=42)
-            pos = nx.spring_layout(G_layout, k=len(labels), iterations=100, seed=42)
+            pos = nx.spring_layout(G_layout, k=1/np.sqrt(len(labels)), iterations=100, seed=42)
+            # pos = nx.spring_layout(G_layout, k=len(labels), iterations=100, seed=42)
 
             fig = go.Figure()
 

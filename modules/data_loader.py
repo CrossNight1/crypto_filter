@@ -3,7 +3,7 @@ import faicons as fa
 import pandas as pd
 from datetime import datetime, timedelta
 from src.data import BinanceFuturesFetcher, DataManager
-from src.config import AVAILABLE_INTERVALS, DEFAULT_FETCH_INTERVALS, MANDATORY_CRYPTO
+from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, DEFAULT_FETCH_INTERVALS
 import asyncio
 
 def data_loader_ui():
@@ -121,8 +121,10 @@ def data_loader_server(input, output, session):
         with ui.Progress(min=1, max=15) as p:
             p.set(message="Fetching top symbols...", detail="Please wait")
             new_syms = fetcher.get_top_volume_symbols(top_n=input.top_n())
-            # Ensure MANDATORY_CRYPTO are always included when filtering
-            selected_symbols.set(set(MANDATORY_CRYPTO).union(new_syms))
+            # Ensure MANDATORY_CRYPTO are always included when filtering, but remove IGNORED_CRYPTO
+            combined = set(MANDATORY_CRYPTO).union(new_syms)
+            filtered = {s for s in combined if s not in IGNORED_CRYPTO}
+            selected_symbols.set(filtered)
 
     @reactive.effect
     @reactive.event(input.btn_add)
@@ -136,7 +138,7 @@ def data_loader_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_reset)
     def _():
-        selected_symbols.set(set(MANDATORY_CRYPTO))
+        selected_symbols.set(set([s for s in MANDATORY_CRYPTO if s not in IGNORED_CRYPTO]))
 
     @reactive.effect
     def _():

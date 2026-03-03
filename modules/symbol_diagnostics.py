@@ -13,7 +13,7 @@ from sklearn.linear_model import LinearRegression
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO
+from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
 from ml_engine.labeling.labeler import Labeler
 from ml_engine.analysis.correlation import DecompositionEngine
@@ -234,8 +234,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
     
     @reactive.Effect
     def populate_symbols():
-        inventory = manager.get_inventory()
-        all_syms = sorted(inventory.keys())
+        all_syms = manager.get_universe()
         ui.update_selectize("diag_symbol", choices=all_syms, selected="BTCUSDT", server=True)
         
         # Set benchmark/global timestamps once
@@ -351,6 +350,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             # Factor Decomp - Load ALL symbols for comprehensive analysis
             market_data = {}
             for s in MANDATORY_CRYPTO:
+                if s in IGNORED_CRYPTO:
+                    continue
                 d = manager.load_data(s, interval)
                 if d is not None:
                     market_data[s] = pd.to_numeric(d['close'], errors='coerce').pct_change()
