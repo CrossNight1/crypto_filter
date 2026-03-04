@@ -33,17 +33,8 @@ app_ui = ui.page_navbar(
         ui.include_css(Path(__file__).parent / "www" / "custom.css"),
         ui.tags.script("""
             document.addEventListener("keydown", function(e) {
-                const box = document.getElementById("quick_symbol");
-                const n_assets_box = document.querySelector('input[id$="n_assets"]');
                 const decomp_n_assets_box = document.querySelector('input[id$="decomp_n_assets"]');
-                
-                if (document.activeElement === box && e.key === "Enter") {
-                    e.preventDefault();
-                    Shiny.setInputValue("quick_symbol_enter", Math.random(), {priority: "event"});
-                }
-                
-                // For n_assets inputs, we just want to trigger a blur to update the value
-                if ((document.activeElement === n_assets_box || document.activeElement === decomp_n_assets_box) && e.key === "Enter") {
+                if (decomp_n_assets_box && document.activeElement === decomp_n_assets_box && e.key === "Enter") {
                     document.activeElement.blur();
                 }
             });
@@ -98,11 +89,11 @@ app_ui = ui.page_navbar(
         )
     ),
 
-    ui.nav_panel("DATA_LOADER", data_loader_ui()),
+    ui.nav_panel("DATA_MANAGER", data_loader_ui()),
     ui.nav_panel("DIAGNOSTICS", symbol_diagnostics_ui()),
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
-    ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
+    ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
     ui.nav_panel("PREDICTIVE", predictive_ui()),
     # ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
@@ -111,7 +102,25 @@ app_ui = ui.page_navbar(
     ui.nav_spacer(),
     ui.nav_control(
         ui.div(
-            ui.input_text("quick_symbol", None, placeholder="Enter Symbol (e.g. BTCUSDT) ", width="250px"),
+            ui.div(
+                ui.input_selectize(
+                    "quick_symbol",
+                    None,
+                    choices=[],
+                    multiple=True,
+                    options={"placeholder": "Launch Assets"}
+                ),
+                class_="flex-grow-1"
+            ),
+            ui.div(
+                ui.input_action_button(
+                    "btn_quick_go",
+                    fa.icon_svg("paper-plane"),
+                    class_="btn-primary btn-sm"  # smaller button
+                ),
+                class_="flex-shrink-0",
+                style="margin-top: -14px;"  # move slightly upwards
+            ),
             class_="d-flex align-items-center gap-2"
         )
     ),
@@ -138,9 +147,12 @@ def server(input, output, session):
     
     @reactive.Effect
     def populate_symbols():
-        all_syms = manager.get_universe()
-        ui.update_selectize("diag_symbol", choices=all_syms, server=True)
-        
+        with ui.Progress(min=0, max=1) as p:
+            p.set(0, message="Initializing Market Data...")
+            all_syms = manager.get_universe()
+            p.set(1, message="Populating Global Selectors...")
+            ui.update_selectize("quick_symbol", choices=all_syms, server=True)
+
         # Set benchmark/global timestamps once
         global_ts = get_timestamps(BENCHMARK_SYMBOL, input.diag_interval())
         data_info.set({"global": global_ts})
@@ -181,19 +193,21 @@ def server(input, output, session):
         ui.update_navset("main_nav", selected="PAIR_RADAR")
 
     @reactive.Effect
-    @reactive.event(input.quick_symbol_enter)
+    @reactive.event(input.btn_quick_go)
     def _quick_link():
-        symbol = input.quick_symbol().strip().upper()
-        if not symbol:
-            # ui.notification_show("Enter a symbol", type="warning")
+        symbols = input.quick_symbol()
+        if not symbols:
             return
-        symbol = symbol.replace("USDT", "")
-        symbol = f"{symbol}USDT"
-        url = f"https://www.binance.com/en/futures/{symbol}"
-        url_cg = "https://legend.coinglass.com/chart/7de78cdae4444cdb9a24cc33d1256a40"
-        for u in [url]:
-            webbrowser.open(u)
-        ui.update_text("quick_symbol", value="")
+            
+        # Ensure we only open if something was just added
+        # Actually, for selectize multi, just open all and clear
+        if isinstance(symbols, (list, tuple)):
+            for sym in symbols:
+                url = f"https://www.binance.com/en/futures/{sym}"
+                webbrowser.open(url)
+        
+        # Clear selection after opening
+        ui.update_selectize("quick_symbol", selected=[])
 
     data_loader_server(input, output, session)
     market_radar_server(input, output, session, global_interval)

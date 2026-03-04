@@ -276,8 +276,6 @@ class MetricsEngine:
 
         return res
 
-        return res
-
     @staticmethod
     def calculate_beta_alpha(asset_returns: np.ndarray, benchmark_returns: np.ndarray) -> tuple:
         """

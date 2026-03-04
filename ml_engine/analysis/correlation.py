@@ -5,31 +5,51 @@ from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
 from scipy.sparse.csgraph import minimum_spanning_tree as scipy_mst
 from sklearn.decomposition import FastICA, PCA
 
-class CorrelationEngine:
+class MatrixEngine:
     """
     Modular engine for calculating correlation matrices between assets.
     """
+    _residual_cache = {}
+
+    @staticmethod
+    def clear_residual_cache():
+        MatrixEngine._residual_cache = {}
+
+    @staticmethod
+    def _get_residual(i, j, wide):
+
+        key = (i, j)
+
+        if key in MatrixEngine._residual_cache:
+            return MatrixEngine._residual_cache[key]
+
+        df_pair = pd.concat([wide[i], wide[j]], axis=1).dropna()
+        if df_pair.shape[0] < 5:
+            return None
+
+        y = df_pair.iloc[:, 0].values
+        x = df_pair.iloc[:, 1].values
+
+        x_ = np.vstack([x, np.ones(len(x))]).T
+        beta = np.linalg.lstsq(x_, y, rcond=None)[0]
+        r = y - x_ @ beta
+
+        MatrixEngine._residual_cache[key] = r
+        return r
 
     @staticmethod
     def calculate_coint_matrix(data_map, window_size=50):
-        def _ols_residual(y, x):
-            x = np.vstack([x, np.ones(len(x))]).T
-            beta = np.linalg.lstsq(x, y, rcond=None)[0]
-            y_hat = x @ beta
-            return y - y_hat
 
-        def _adf_tstat(residual):
+        def _adf_tstat(r):
 
-            r = np.asarray(residual, dtype=float)
+            r = np.asarray(r, dtype=float)
             if len(r) < 5 or np.any(~np.isfinite(r)):
-                # print("Invalid residual")
                 return np.nan
 
             dr = np.diff(r)
             r_lag = r[:-1]
 
             X = np.column_stack([r_lag, np.ones(len(r_lag))])
-
             beta = np.linalg.lstsq(X, dr, rcond=None)[0]
 
             pred = X @ beta
@@ -37,49 +57,41 @@ class CorrelationEngine:
 
             dof = len(dr) - 2
             if dof <= 0:
-                # print("Invalid dof")
                 return np.nan
 
             s2 = np.sum(err**2) / dof
             var_beta = s2 * np.linalg.pinv(X.T @ X)
 
-            if var_beta[0,0] <= 0:
+            if var_beta[0, 0] <= 0:
                 return np.nan
 
-            se = np.sqrt(var_beta[0,0])
+            se = np.sqrt(var_beta[0, 0])
             if se == 0:
                 return np.nan
 
             return beta[0] / se
 
-        wide = data_map[-window_size:]
-        wide = wide.dropna(axis=1, how="any").dropna(axis=0, how="any")
+        MatrixEngine.clear_residual_cache()
+        wide = pd.DataFrame(data_map)[-window_size:]
         wide = np.log(wide)
 
-        common_cols = wide.columns.intersection(wide.columns)
-        cols = common_cols
-
-        coint_long = pd.DataFrame(np.nan, index=cols, columns=cols)
+        cols = wide.columns
+        coint_matrix = pd.DataFrame(np.nan, index=cols, columns=cols)
 
         for i in cols:
             for j in cols:
+
                 if i == j:
-                    coint_long.loc[i, j] = 0
+                    coint_matrix.loc[i, j] = 0
                     continue
 
-                df_pair = pd.concat([wide[i], wide[j]], axis=1).dropna()
+                r = MatrixEngine._get_residual(i, j, wide)
+                if r is None:
+                    continue
 
-                y = df_pair.iloc[:, 0].values
-                x = df_pair.iloc[:, 1].values
-                try:
-                    r = _ols_residual(y, x)
-                    coint_long.loc[i, j] = _adf_tstat(r)
-                except:
-                    pass
+                coint_matrix.loc[i, j] = _adf_tstat(r)
 
-        coint_long = coint_long.fillna(0)
-
-        return coint_long
+        return coint_matrix.fillna(0)
 
     @staticmethod
     def calculate_matrix(data_map, method="pearson", window_size=50):
@@ -148,11 +160,13 @@ class CorrelationEngine:
         wide_df = pd.DataFrame(data_map)[window_size:]
         cov = wide_df.cov(min_periods=window_size)
 
-        cov = CorrelationEngine.stabilize_matrix(cov)
+        cov = MatrixEngine.stabilize_matrix(cov)
 
-        precision = CorrelationEngine.safe_pinv(cov.values)
+        precision = MatrixEngine.safe_pinv(cov.values)
 
-        d = np.sqrt(np.diag(precision))
+        diag_vals = np.diag(precision)
+        diag_vals = np.clip(diag_vals, a_min=1e-12, a_max=None)
+        d = np.sqrt(diag_vals)
         partial = -precision / np.outer(d, d)
 
         np.fill_diagonal(partial, 1)
@@ -165,9 +179,9 @@ class CorrelationEngine:
         wide_df = pd.DataFrame(data_map)[window_size:]
         cov = wide_df.cov(min_periods=window_size)
 
-        cov = CorrelationEngine.stabilize_matrix(cov)
+        cov = MatrixEngine.stabilize_matrix(cov)
 
-        precision = CorrelationEngine.safe_pinv(cov.values)
+        precision = MatrixEngine.safe_pinv(cov.values)
 
         return pd.DataFrame(precision, index=cov.index, columns=cov.columns)
 
@@ -196,7 +210,172 @@ class CorrelationEngine:
                 
         return matrix, dropped_symbols
 
+    @staticmethod
+    def calculate_zscore_matrix(data_map, window_size=50):
 
+        wide = pd.DataFrame(data_map)[-window_size:]
+        wide = wide.dropna(axis=1, how="any").dropna(axis=0, how="any")
+        wide = np.log(wide)
+
+        cols = wide.columns
+        z_matrix = pd.DataFrame(np.nan, index=cols, columns=cols)
+
+        for i in cols:
+            for j in cols:
+
+                if i == j:
+                    z_matrix.loc[i, j] = 0
+                    continue
+
+                r = MatrixEngine._get_residual(i, j, wide)
+                if r is None or len(r) < 5:
+                    continue
+
+                mu = np.mean(r)
+                sigma = np.std(r) + 1e-6
+
+                z_matrix.loc[i, j] = (r[-1] - mu) / sigma
+
+        return z_matrix
+
+    @staticmethod
+    def calculate_halflife_matrix(data_map, window_size=50):
+
+        wide = pd.DataFrame(data_map)[-window_size:]
+        wide = wide.dropna(axis=1, how="any").dropna(axis=0, how="any")
+        wide = np.log(wide)
+
+        cols = wide.columns
+        hl_matrix = pd.DataFrame(np.nan, index=cols, columns=cols)
+
+        for i in cols:
+            for j in cols:
+
+                if i == j:
+                    hl_matrix.loc[i, j] = 0
+                    continue
+
+                r = MatrixEngine._get_residual(i, j, wide)
+                if r is None or len(r) < 10:
+                    continue
+
+                dr = np.diff(r)
+                r_lag = r[:-1]
+
+                X = np.column_stack([r_lag, np.ones(len(r_lag))])
+                beta = np.linalg.lstsq(X, dr, rcond=None)[0][0]
+
+                if beta >= 0:
+                    hl_matrix.loc[i, j] = 0
+                    continue
+
+                halflife = -np.log(2) / beta
+                if halflife > 100:
+                    hl_matrix.loc[i, j] = 0
+                    continue
+
+                hl_matrix.loc[i, j] = halflife
+
+        return hl_matrix
+
+    @staticmethod
+    def calculate_vol_ratio_matrix(data_map, window_size=50):
+
+        wide = pd.DataFrame(data_map)[-window_size:]
+
+        returns = np.log(wide).diff().dropna(axis=0, how="all")
+        vol = returns.std()
+
+        cols = vol.index
+        vr_matrix = pd.DataFrame(np.nan, index=cols, columns=cols)
+
+        for i in cols:
+            for j in cols:
+
+                if i == j:
+                    vr_matrix.loc[i, j] = 1
+                    continue
+
+                if vol[j] == 0:
+                    continue
+
+                ratio = vol[i] / vol[j]
+                vr_matrix.loc[i, j] = min(ratio, 1 / ratio)
+
+        return vr_matrix
+
+    @staticmethod
+    def calculate_arbitrage_score_matrix(data_map, window_size=50, weights=None):
+        """
+        Compute an arbitrage score matrix combining correlation, partial correlation,
+        cointegration, z-score, and half-life.
+
+        Returns:
+            pd.DataFrame: matrix of arbitrage scores (0–1 normalized)
+        """
+        if weights is None:
+            weights = {
+                "corr": 0.2,
+                "partial": 0.1,
+                "halflife": 0.2,
+                "coint": 0.3,
+                "zscore": 0.2,
+            }
+
+        # Compute base matrices
+        corr = MatrixEngine.calculate_matrix(data_map, method="pearson", window_size=window_size)
+        partial = MatrixEngine.calculate_partial_correlation(data_map, window_size=window_size)
+        coint = MatrixEngine.calculate_coint_matrix(data_map, window_size=window_size)
+        zscore = MatrixEngine.calculate_zscore_matrix(data_map, window_size=window_size)
+        halflife = MatrixEngine.calculate_halflife_matrix(data_map, window_size=window_size)
+
+        # Transform directions: higher = better
+        corr_s = corr.abs()
+        partial_s = partial.abs()
+        coint_s = -coint           # more negative ADF = stronger
+        z_s = zscore.abs()
+        
+        # Safe inverse: avoid division by zero or very small values
+        hl_s = pd.DataFrame(0.0, index=halflife.index, columns=halflife.columns)
+        mask = (halflife > 0)
+        hl_s[mask] = 1.0 / halflife[mask]
+
+        # Normalize helper
+        def normalize(mat):
+            # Replace inf with nan for min/max calculation
+            vals = mat.values
+            vals = vals[np.isfinite(vals)]
+            if len(vals) == 0:
+                return mat * 0
+            
+            v_min = np.min(vals)
+            v_max = np.max(vals)
+            
+            if v_max - v_min == 0:
+                return mat * 0
+            
+            # Clip and then normalize to ensure [0, 1] and no infs
+            normed = (mat.clip(v_min, v_max) - v_min) / (v_max - v_min)
+            return normed.fillna(0)
+
+        corr_s = normalize(corr_s)
+        partial_s = normalize(partial_s)
+        coint_s = normalize(coint_s)
+        z_s = normalize(z_s)
+        hl_s = normalize(hl_s)
+
+        # Weighted aggregation
+        score = (
+            weights["corr"] * corr_s +
+            weights["partial"] * partial_s +
+            weights["coint"] * coint_s +
+            weights["zscore"] * z_s +
+            weights["halflife"] * hl_s
+        )
+
+        score = score
+        return score        
+        
 class DecompositionEngine:
     """Spectral, statistical, and structural decomposition of matrices."""
 

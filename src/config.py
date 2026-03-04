@@ -57,7 +57,7 @@ METRIC_LABELS = {
     'atr_norm': 'Normalized ATR',
     'cmf': 'Chaikin Money Flow',
     'vwap_z': 'VWAP Z-Score',
-    'rel_strength_z': 'Rel Strength Z-Score',
+    'rel_strength_z': 'RS Z-Score',
     'price_zscore': 'Price Z-Score',
     'vam': 'VAM (Vol-Adj Momentum)',
     'skewness': 'Return Skewness',

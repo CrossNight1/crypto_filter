@@ -705,8 +705,11 @@ def predictive_server(input, output, session):
 
     @reactive.effect
     def _():
-        uni = manager.get_universe()
-        inventory.set(uni)
+        with ui.Progress(min=0, max=1) as p:
+            p.set(0, message="Loading Predictive Universe...")
+            uni = manager.get_universe()
+            p.set(1, message="Ready.")
+            inventory.set(uni)
 
     @render.ui
     def symbol_selection_ui():

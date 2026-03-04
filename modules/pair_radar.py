@@ -81,7 +81,7 @@ def pair_radar_ui():
                     ui.column(
                         9,
                         ui.card(
-                            ui.card_header("Copula Fit (Dependency Mapping)"),
+                            ui.card_header("Copula Dependency"),
                             output_widget("pair_copula_chart"),
                             full_screen=True
                         )
@@ -106,11 +106,23 @@ def pair_radar_server(input, output, session, global_interval):
 
     @reactive.effect
     def populate_selectors():
-        all_syms = manager.get_universe()
-        ui.update_selectize("symbol_a", choices=all_syms, selected="BTCUSDT")
-        ui.update_selectize("symbol_b", choices=all_syms, selected="ETHUSDT")
-        ui.update_select("pair_interval", choices=AVAILABLE_INTERVALS, selected=global_interval.get())
+        with ui.Progress(min=0, max=1) as p:
+            p.set(0, message="Synchronizing Universe...")
+            all_syms = manager.get_universe()
+            p.set(1, message="Updating Pair Selectors...")
+            ui.update_selectize("symbol_a", choices=all_syms, selected="BTCUSDT")
+            ui.update_selectize("symbol_b", choices=all_syms, selected="ETHUSDT")
+            ui.update_select("pair_interval", choices=AVAILABLE_INTERVALS, selected=global_interval.get())
 
+    @reactive.effect
+    @reactive.event(input.r_window)
+    def _update_symbol_choices():
+        # Preserving selection while refreshing universe choices
+        if not input.r_window():
+            ui.update_numeric("r_window", value=1)
+        else:
+            ui.update_numeric("r_window", value=input.r_window())
+        
     @reactive.Effect
     @reactive.event(input.btn_gen_pair)
     def _generate_radar():
@@ -426,97 +438,6 @@ def pair_radar_server(input, output, session, global_interval):
         # Put all boxes in a single row using layout_columns for better scaling
         return ui.layout_columns(*boxes, fill=False)
 
-                        
-    # @render_widget
-    # def pair_copula_chart():
-    #     df = pair_data.get()
-    #     if df.empty or "price_a" not in df.columns or "price_b" not in df.columns:
-    #         return None
-
-    #     # Convert back from log10 to original prices
-    #     df = np.exp(df)
-    #     df = df.tail(input.pair_window())
-    #     x = df["price_a"].values
-    #     y = df["price_b"].values
-
-    #     # Joint KDE
-    #     values = np.vstack([x, y])
-    #     kde = gaussian_kde(values)
-
-    #     # Conditional P(A|B) and P(B|A)
-    #     px_given_y = []
-    #     py_given_x = []
-    #     for xi, yi in zip(x, y):
-    #         pxy = kde([xi, yi])[0]
-    #         py = np.mean([kde([xj, yi])[0] for xj in x])
-    #         px = np.mean([kde([xi, yj])[0] for yj in y])
-    #         px_given_y.append(pxy / py if py > 0 else 0)
-    #         py_given_x.append(pxy / px if px > 0 else 0)
-
-    #     px_prob = (np.array(px_given_y) - np.min(px_given_y)) / (np.max(px_given_y) - np.min(px_given_y) + 1e-9)
-    #     py_prob = (np.array(py_given_x) - np.min(py_given_x)) / (np.max(py_given_x) - np.min(py_given_x) + 1e-9)
-
-    #     # Rank-based probabilities for axes
-    #     rank_x = rankdata(x) / len(x)
-    #     rank_y = rankdata(y) / len(y)
-
-    #     fig = go.Figure()
-
-    #     # Scatter: all points
-    #     fig.add_trace(go.Scatter(
-    #         x=rank_x,
-    #         y=rank_y,
-    #         mode='markers',
-    #         marker=dict(
-    #             size=7,
-    #             color='cyan',
-    #             opacity=0.7,
-    #             line=dict(width=1, color='rgba(255,255,255,0.3)')
-    #         ),
-    #         text=[f"A: ${pa:,.2f}<br>B: ${pb:,.2f}" for pa, pb in zip(x, y)],
-    #         hovertemplate=(
-    #             "<b>Conditional Copula</b><br>"
-    #             "Rank A: %{x:.2f}<br>"
-    #             "Rank B: %{y:.2f}<br>"
-    #             "P(A | B): %{customdata[0]:.3f}<br>"
-    #             "P(B | A): %{customdata[1]:.3f}<br>"
-    #             "%{text}<extra></extra>"
-    #         ),
-    #         customdata=np.vstack([px_prob, py_prob]).T,
-    #         name="All Points"
-    #     ))
-
-    #     # Highlight current/latest price
-    #     fig.add_trace(go.Scatter(
-    #         x=[rank_x[-1]],
-    #         y=[rank_y[-1]],
-    #         mode='markers',
-    #         marker=dict(
-    #             size=10.5,
-    #             color='red',
-    #             line=dict(width=1, color='white')
-    #         ),
-    #         text=[f"Current A: ${x[-1]:,.4f}<br>Current B: ${y[-1]:,.4f}"],
-    #         hovertemplate="%{text}<extra></extra>",
-    #         name="Current Price"
-    #     ))
-
-    #     fig.update_layout(
-    #         template="plotly_dark",
-    #         showlegend=False,
-    #         paper_bgcolor="#0b3d91",
-    #         plot_bgcolor="#0b3d91",
-    #         font=dict(family="Space Mono", color="white"),
-    #         xaxis_title=f"Rank P({input.symbol_a()})",
-    #         yaxis_title=f"Rank P({input.symbol_b()})",
-    #         margin=dict(l=60, r=60, t=60, b=60),
-    #         height=600,
-    #         xaxis=dict(gridcolor="rgba(255,255,255,0.1)", range=[-0.05, 1.05], zeroline=False),
-    #         yaxis=dict(gridcolor="rgba(255,255,255,0.1)", range=[-0.05, 1.05], zeroline=False)
-    #     )
-
-    #     return fig
-
     @render_widget
     def pair_copula_chart():
         df = pair_data.get()
@@ -526,6 +447,10 @@ def pair_radar_server(input, output, session, global_interval):
         mode = input.copula_mode()
         w = max(input.pair_window(), 10)
         df_plot = df.tail(w).copy()
+        if input.r_window():
+            r_window = max(input.r_window(), 1)
+        else:
+            r_window = 1
 
         if mode == "price":
             x = np.exp(df_plot["price_a"].values)
@@ -533,12 +458,24 @@ def pair_radar_server(input, output, session, global_interval):
             title_suffix = " (Price Levels)"
         else:
             df_plot = df_plot.dropna(subset=["log_ret_a", "log_ret_b"])
-            x = df_plot["log_ret_a"].rolling(input.r_window()).mean().dropna().values
-            y = df_plot["log_ret_b"].rolling(input.r_window()).mean().dropna().values
-            title_suffix = " (Log Returns)"
+            if len(df_plot) < 2 or r_window < 2:
+                # If window is 1 or data too short, we can't compute std reliably
+                # Fallback to simple returns or notify user
+                x = df_plot["log_ret_a"].values
+                y = df_plot["log_ret_b"].values
+                title_suffix = " (Raw Log Returns)"
+            else:
+                eps = 1e-9
+                x = (df_plot["log_ret_a"].rolling(r_window).sum().dropna() / (df_plot["log_ret_a"].rolling(r_window).std().dropna() + eps)).values
+                y = (df_plot["log_ret_b"].rolling(r_window).sum().dropna() / (df_plot["log_ret_b"].rolling(r_window).std().dropna() + eps)).values
+                title_suffix = " (Log Returns)"
 
         if len(x) < 2:
             return None
+
+        # Sanitize inputs before ranking to avoid all-NaN ranking
+        x = _sanitize(x)
+        y = _sanitize(y)
 
         rank_x = rankdata(x) / (len(x) + 1)
         rank_y = rankdata(y) / (len(y) + 1)
@@ -570,9 +507,9 @@ def pair_radar_server(input, output, session, global_interval):
                 x=rank_x[-10:],
                 y=rank_y[-10:],
                 mode='lines+markers',
-                line=dict(color='yellow', width=1.5, dash='dot'),
-                marker=dict(size=4, color='yellow'),
-                name="Last 10 Ticks",
+                line=dict(color='yellow', width=1.5, dash='dot', shape='spline', smoothing=1.1),
+                marker=dict(size=6, color='yellow'),
+                # name="Last 10 Ticks",
                 hoverinfo='skip'
             ))
 

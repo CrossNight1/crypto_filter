@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.figure_factory as ff
 from src.data import DataManager
-from ml_engine.analysis.correlation import CorrelationEngine, DecompositionEngine
+from ml_engine.analysis.correlation import MatrixEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,8 +43,23 @@ def multivariate_analysis_ui():
 
                     ui.input_select(
                         "dependence_structure",
-                        "Dependence Structure",
-                        choices=["Correlation", "Covariance", "Cointegration"]
+                        "Structure",
+                        choices=["Correlation", "Partial Correlation", "Covariance", "Arbitrage"]
+                    ),
+
+                    ui.panel_conditional(
+                        "input.dependence_structure === 'Arbitrage'",
+                        ui.input_select(
+                            "arb_method",
+                            "Method",
+                            choices={
+                                "cointegration": "Cointegration", 
+                                "zscore": "Z-Score", 
+                                "halflife": "Half-life", 
+                                "vol_ratio": "Volatility Ratio",
+                                "arbitrage_score": "Arbitrage Score"
+                            }
+                        ),
                     ),
 
                     ui.panel_conditional(
@@ -61,7 +76,7 @@ def multivariate_analysis_ui():
                     ui.input_numeric(
                         "window_size",
                         "Window Size",
-                        value=100,
+                        value=1000,
                         min=10,
                         max=2000
                     ),
@@ -101,9 +116,6 @@ def multivariate_analysis_ui():
                         choices={
                             "eigen": "PCA (Eigenvalue)",
                             "rmt": "RMT Spectral Filter",
-                            # "kfactor": "K-Factor",
-                            # "ica": "ICA",
-                            # "distance": "Distance Matrix",
                             "cluster": "Hierarchical Clustering",
                             "mst": "Spillover Network"
                         }
@@ -264,7 +276,10 @@ def multivariate_analysis_server(input, output, session):
     @reactive.event(input.corr_interval, input.decomp_interval)
     def _update_symbol_choices():
         # Preserving selection while refreshing universe choices
-        all_syms = manager.get_universe()
+        with ui.Progress(min=0, max=1) as p:
+            p.set(0, message="Scanning Market for Assets...")
+            all_syms = manager.get_universe()
+            p.set(1, message="Finalizing Selection...")
         
         curr_sel_corr = sorted(list(selected_symbols_corr.get()))
         ui.update_selectize("corr_symbols", choices=all_syms, selected=curr_sel_corr)
@@ -374,7 +389,7 @@ def multivariate_analysis_server(input, output, session):
             if structure == "Correlation":
                 data_map = _load_return_data(symbols, interval, p)
                 if not data_map: return
-                raw_matrix = CorrelationEngine.calculate_matrix(
+                raw_matrix = MatrixEngine.calculate_matrix(
                     data_map,
                     method=input.corr_method(),
                     window_size=input.window_size()
@@ -382,39 +397,62 @@ def multivariate_analysis_server(input, output, session):
             elif structure == "Covariance":
                 data_map = _load_return_data(symbols, interval, p)
                 if not data_map: return
-                raw_matrix = CorrelationEngine.calculate_covariance(
+                raw_matrix = MatrixEngine.calculate_covariance(
                     data_map,
                     window_size=input.window_size()
                 )
-            elif structure == "Cointegration":
-                price = _load_price_data(symbols, interval, p)
-                if not price: return
-                price_df = pd.DataFrame(price)
-                raw_matrix = CorrelationEngine.calculate_coint_matrix(
-                    price_df,
-                    window_size=input.window_size()
-                )
-                raw_matrix = raw_matrix * -1
-                
             elif structure == "Partial Correlation":
                 data_map = _load_return_data(symbols, interval, p)
                 if not data_map: return
-                raw_matrix = CorrelationEngine.calculate_partial_correlation(
+                raw_matrix = MatrixEngine.calculate_partial_correlation(
                     data_map,
                     window_size=input.window_size()
                 )
-            elif structure == "Precision Matrix":
-                data_map = _load_return_data(symbols, interval, p)
-                if not data_map: return
-                raw_matrix = CorrelationEngine.calculate_precision_matrix(
-                    data_map,
-                    window_size=input.window_size()
-                )
+            elif structure == "Arbitrage":
+                method = input.arb_method()
+                if method == "cointegration":
+                    price = _load_price_data(symbols, interval, p)
+                    if not price: return
+                    price_df = pd.DataFrame(price)
+                    raw_matrix = MatrixEngine.calculate_coint_matrix(
+                        price_df,
+                        window_size=input.window_size()
+                    )
+                elif method == "zscore":
+                    price = _load_price_data(symbols, interval, p)
+                    if not price: return
+                    raw_matrix = MatrixEngine.calculate_zscore_matrix(
+                        price,
+                        window_size=input.window_size()
+                    )
+                elif method == "halflife":
+                    price = _load_price_data(symbols, interval, p)
+                    if not price: return
+                    raw_matrix = MatrixEngine.calculate_halflife_matrix(
+                        price,
+                        window_size=input.window_size()
+                    )
+                elif method == "vol_ratio":
+                    price = _load_price_data(symbols, interval, p)
+                    if not price: return
+                    raw_matrix = MatrixEngine.calculate_vol_ratio_matrix(
+                        price,
+                        window_size=input.window_size()
+                    )
+                elif method == "arbitrage_score":
+                    price = _load_price_data(symbols, interval, p)
+                    if not price: return
+                    raw_matrix = MatrixEngine.calculate_arbitrage_score_matrix(
+                        price,
+                        window_size=input.window_size()
+                    )
+                else:
+                    return
             else:
                 return
 
-            filtered_matrix, _ = CorrelationEngine.filter_blanks(raw_matrix)
-            filtered_matrix = filtered_matrix.sort_values(by=filtered_matrix.columns[0], ascending=False)
+            filtered_matrix, _ = MatrixEngine.filter_blanks(raw_matrix)
+            # filtered_matrix = filtered_matrix.sort_values(by=filtered_matrix.columns[0], ascending=False)
             correlation_matrix.set(filtered_matrix)
 
     @render.ui
@@ -424,14 +462,15 @@ def multivariate_analysis_server(input, output, session):
             # print("Matrix is empty")
             return None
 
-        df = df[-input.window_size():]
+        # df = df[-input.window_size():] # This was likely a bug or misunderstanding, the matrix is already windowed
         df = df.dropna(axis=1, how="all")
         df = df.dropna(axis=0, how="all")
 
         print("Matrix generated")
+        name = f"{input.dependence_structure()}{f' - {input.arb_method()}' if input.dependence_structure() == 'Arbitrage' else f' - {input.corr_method()}' if input.dependence_structure() == 'Correlation' else ''} Matrix"
         return ui.div(
             ui.card(
-                ui.card_header(f"{input.dependence_structure()} Matrix"),
+                ui.card_header(name),
                 output_widget("matrix_chart"),
                 full_screen=True
             ),
@@ -460,17 +499,39 @@ def multivariate_analysis_server(input, output, session):
             return go.Figure()
 
         structure = input.dependence_structure()
-        if structure == "Correlation":
-            zmin, zmax = -1, 1
-        else:
-            zmin, zmax = None, None
-
+        zmin, zmax = None, None
+        colorscale = "Spectral_r"
         # Sanitize for Plotly
         clean_df = _sanitize(df)
 
+        if structure == "Correlation" or structure == "Partial Correlation":
+            zmin, zmax = -1, 1
+        elif structure == "Arbitrage":
+            method = input.arb_method()
+            if method == "cointegration":
+                c_min = clean_df.min().min()
+                c_max = clean_df.max().max()
+                zmin = c_min if np.isfinite(c_min) else -5
+                zmax = c_max if np.isfinite(c_max) else 0
+            elif method == "zscore":
+                zmin, zmax = -3, 3
+            elif method == "vol_ratio":
+                c_max = clean_df.max().max()
+                zmin = 0
+                zmax = c_max if np.isfinite(c_max) else 1
+            elif method == "halflife":
+                c_max = clean_df.max().max()
+                zmin = 0
+                zmax = c_max if np.isfinite(c_max) else 50
+            elif method == "arbitrage_score":
+                c_min = clean_df.min().min()
+                c_max = clean_df.max().max()
+                zmin = c_min if np.isfinite(c_min) else 0
+                zmax = c_max if np.isfinite(c_max) else 1
+
         fig = px.imshow(
             clean_df, text_auto=".2f", aspect="auto",
-            color_continuous_scale="Spectral_r",
+            color_continuous_scale=colorscale,
             zmin=zmin, zmax=zmax,
             template="plotly_dark"
         )
@@ -488,11 +549,28 @@ def multivariate_analysis_server(input, output, session):
                 # Highlight Column
                 shapes.append(dict(
                     type="rect",
-                    xref="x", yref="paper",
-                    x0=col_idx - 0.5, y0=0,
-                    x1=col_idx + 0.5, y1=1,
-                    line=dict(color="#FF00FF", width=2),
-                    fillcolor="rgba(0,0,0,0)"
+                    xref="x",
+                    yref="paper",
+                    x0=col_idx - 0.52,
+                    y0=0,
+                    x1=col_idx + 0.52,
+                    y1=1,
+                    line=dict(color="#000000", width=3),
+                    fillcolor="rgba(0,0,0,0)",
+                    layer="above"
+                ))
+
+                shapes.append(dict(
+                    type="rect",
+                    xref="x",
+                    yref="paper",
+                    x0=col_idx - 0.5,
+                    y0=0,
+                    x1=col_idx + 0.5,
+                    y1=1,
+                    line=dict(color="#FFFFFF", width=2),
+                    fillcolor="rgba(0,0,0,0)",
+                    layer="above"
                 ))
             
             if focus_sym in indices:
@@ -500,13 +578,29 @@ def multivariate_analysis_server(input, output, session):
                 # Highlight Row
                 shapes.append(dict(
                     type="rect",
-                    xref="paper", yref="y",
-                    x0=0, y0=row_idx - 0.5, 
-                    x1=1, y1=row_idx + 0.5,
-                    line=dict(color="#FF00FF", width=2),
-                    fillcolor="rgba(0,0,0,0)"
+                    xref="paper",
+                    yref="y",
+                    x0=0,
+                    y0=row_idx - 0.55,
+                    x1=1,
+                    y1=row_idx + 0.55,
+                    line=dict(color="#000000", width=2.5),
+                    fillcolor="rgba(0,0,0,0)",
+                    layer="above"
                 ))
-                
+
+                shapes.append(dict(
+                    type="rect",
+                    xref="paper",
+                    yref="y",
+                    x0=0,
+                    y0=row_idx - 0.5,
+                    x1=1,
+                    y1=row_idx + 0.5,
+                    line=dict(color="#FFFFFF", width=2),
+                    fillcolor="rgba(0,0,0,0)",
+                    layer="above"
+                ))
             if shapes:
                 fig.update_layout(shapes=shapes)
         fig.update_layout(
@@ -575,8 +669,8 @@ def multivariate_analysis_server(input, output, session):
             df_aligned = pd.DataFrame(data_map).dropna()
             
             # Use aligned data for calculations
-            corr = CorrelationEngine.calculate_matrix(data_map, method="pearson", window_size=window)
-            corr_clean, _ = CorrelationEngine.filter_blanks(corr)
+            corr = MatrixEngine.calculate_matrix(data_map, method="pearson", window_size=window)
+            corr_clean, _ = MatrixEngine.filter_blanks(corr)
 
             step = 20
             step += 1

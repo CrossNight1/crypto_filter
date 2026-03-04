@@ -331,7 +331,6 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             losses = np.abs(log_rets[log_rets <= threshold].sum())
             omega_ratio = gains / losses if losses != 0 else 0
             
-            
             # 3. Metrics Snapshot
             latest_metrics = engine.calculate_all_indicators(
                 df.iloc[-window * 2:], 
@@ -422,11 +421,14 @@ def symbol_diagnostics_server(input, output, session, global_interval):
 
             col_droped = ["volatility"]
             latest_metrics = latest_metrics.drop(columns=col_droped)
-            latest_metrics = latest_metrics.dropna(axis=1).dropna(axis=0)
+            latest_metrics = latest_metrics.dropna(axis=1, how="all")
+            latest_metrics = latest_metrics.dropna(axis=0, how="all")
             
-            from scipy.stats import zscore
+            def z_score(x):
+                return (x - x.mean()) / x.std()
+
             for col in latest_metrics.columns:
-                latest_metrics[col] = zscore(latest_metrics[col])
+                latest_metrics[col] = z_score(latest_metrics[col])
 
             # Pack Data
             data_pack = {
