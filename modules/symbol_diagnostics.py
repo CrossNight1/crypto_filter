@@ -1,4 +1,5 @@
 from shiny import ui, render, reactive
+import warnings
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -16,7 +17,7 @@ from src.metrics import MetricsEngine
 from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
 from ml_engine.labeling.labeler import Labeler
-from ml_engine.analysis.correlation import DecompositionEngine
+from ml_engine.analysis.multivariate import DecompositionEngine
 from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
 
 # --- GARCH HELPER ---
@@ -42,42 +43,25 @@ def fit_garch(returns):
                    bounds=bounds, method='L-BFGS-B')
     return res.x
 
-def forecast_garch(params, returns, steps=10, ann_factor=1):
-    omega, alpha, beta = params
-    # Last sigma2
-    sigma2_t = np.var(returns) # simplistic start if rebuilding full path is slow
-    # Better: rebuild last variance
-    n = len(returns)
-    sigma2 = np.zeros(n)
-    sigma2[0] = np.var(returns)
-    for t in range(1, n):
-        sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
-    
-    last_sigma2 = sigma2[-1]
-    last_ret2 = returns[-1]**2
-    
-    forecasts = []
-    current_sigma2 = omega + alpha * last_ret2 + beta * last_sigma2
-    
-    # Long run variance = omega / (1 - alpha - beta)
-    var_long = omega / (1 - alpha - beta) if (alpha + beta) < 1 else np.var(returns)
+from arch import arch_model
 
-    for _ in range(steps):
-        forecasts.append(np.sqrt(current_sigma2) * np.sqrt(ann_factor))
-        # E[r_{t+k}^2] = sigma_{t+k}^2
-        current_sigma2 = omega + alpha * current_sigma2 + beta * current_sigma2
-        # Actually E[sigma^2_{t+1}] = omega + (alpha+beta)*sigma^2_t
-        # So we project variance:
-        # sigma^2_{t+k} = var_long + (alpha+beta)^(k-1) * (sigma^2_{t+1} - var_long)
-    
-    # Re-calculate correct projection loop
-    fc_vars = []
-    curr = omega + alpha * last_ret2 + beta * last_sigma2
-    for _ in range(steps):
-        fc_vars.append(curr)
-        curr = omega + (alpha + beta) * curr
-        
-    return np.sqrt(fc_vars) * np.sqrt(ann_factor)
+def forecast_garch(returns, steps=10, ann_factor=1):
+    r = np.asarray(returns)
+    model = arch_model(
+        r,
+        mean="Zero",
+        vol="GARCH",
+        p=1,
+        q=1,
+        rescale=True
+    )
+
+    res = model.fit(disp="off")
+    hist_vol = res.conditional_volatility * np.sqrt(ann_factor)
+    fc = res.forecast(horizon=steps)
+    fc_var = fc.variance.values[-1]
+    fc_vol = np.sqrt(fc_var) * np.sqrt(ann_factor)
+    return fc_vol, hist_vol
 
 # --- STYLING CONSTANTS ---
 THEME_BG = "#0b3d91"
@@ -121,14 +105,18 @@ def symbol_diagnostics_ui():
                             # 1. Performance Overview
                             ui.card(
                                 ui.card_header("Performance Overview"),
-                                ui.layout_columns(
-                                    ui.value_box("CVaR", ui.output_text("val_cvar"), theme="primary"),
-                                    ui.value_box("Volatility", ui.output_text("val_vol"), theme="blue"),
-                                    ui.value_box("Omega Ratio", ui.output_text("val_omega"), theme="red"),
-                                    ui.value_box("Avg Drawdown", ui.output_text("val_avgdd"), theme="orange"),
-                                    ui.value_box("Beta", ui.output_text("val_beta"), theme="info"),
-                                    ui.value_box("Alpha", ui.output_text("val_alpha"), theme="success"),
-                                )
+                                ui.div(
+                                    ui.value_box("CVaR", ui.output_text("val_cvar"), theme="primary", class_="small-box"),
+                                    ui.value_box("Volatility", ui.output_text("val_vol"), theme="blue", class_="small-box"),
+                                    ui.value_box("Omega Ratio", ui.output_text("val_omega"), theme="red", class_="small-box"),
+                                    ui.value_box("Avg Drawdown", ui.output_text("val_avgdd"), theme="orange", class_="small-box"),
+                                    ui.value_box("Beta", ui.output_text("val_beta"), theme="info", class_="small-box"),
+                                    ui.value_box("Alpha", ui.output_text("val_alpha"), theme="success", class_="small-box"),
+                                    ui.value_box("Impact Spread", ui.output_text("val_impact_spread"), theme="warning", class_="small-box"),
+                                    ui.value_box("OBook Imbalance", ui.output_text("val_imbalance"), theme="teal", class_="small-box"),
+                                    class_="d-flex flex-row flex-nowrap gap-1 overflow-auto justify-content-between",
+                                    style="padding-bottom: 5px;"
+                                )                               
                             ),
                             
                             # 2. Metrics & Exposure
@@ -356,7 +344,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                     market_data[s] = pd.to_numeric(d['close'], errors='coerce').pct_change()
             
             factor_df = pd.DataFrame(market_data).ffill().fillna(0).tail(window)
-            mn_cum_ret = pd.Series()
+            mn_cum_ret = pd.Series(dtype=float)
             
             if factor_df.shape[1] > 2:
                 decomp_res = DecompositionEngine.k_factor_decompose(factor_df, k=5)
@@ -373,33 +361,78 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             
             p.set(70, message="Forecasting...")
             
-            # 5. Forecast
-            # ARIMA for Price
+            # --- Timestamp generation for Forecast ---
             try:
-                history_price = prices[-window:]
-                model = ARIMA(history_price, order=(5,1,5))
-                model_fit = model.fit()
-                fc_res = model_fit.get_forecast(steps=10)
-                fc_mean = fc_res.predicted_mean
-                fc_ci = fc_res.conf_int(alpha=0.05)
+                ts_series = pd.to_datetime(df['open_time'])
+                history_ts_full = ts_series.dt.strftime('%Y-%m-%d %H:%M').values
+                
+                # We need history timestamps for the charts
+                # Price chart uses prices[-window-10:]
+                price_hist_ts = history_ts_full[-window-10:]
+                # Vol chart uses window
+                vol_hist_ts = history_ts_full[-window:]
+                
+                # Generate future timestamps
+                last_ts = ts_series.iloc[-1]
+                unit = interval[-1]
+                val = int(interval[:-1])
+                unit_map = {'m': 'min', 'h': 'H', 'd': 'D', 'w': 'W'}
+                freq = f"{val}{unit_map.get(unit, 'H')}"
+                
+                forecast_ts = pd.date_range(
+                    start=last_ts + pd.Timedelta(freq), 
+                    periods=10, 
+                    freq=freq
+                ).strftime('%Y-%m-%d %H:%M').values
             except Exception as e:
-                logger.log("Symbol Diagnostics", "ERROR", f"ARIMA failed: {e}")
-                fc_mean, fc_ci = np.zeros(10), np.zeros((10, 2))
+                logger.log("Symbol Diagnostics", "ERROR", f"Timestamp generation failed: {e}")
+                price_hist_ts = np.arange(window + 10)
+                vol_hist_ts = np.arange(window)
+                forecast_ts = np.arange(window + 10, window + 20)
+
+            # 5. Forecast
+            try:
+                # ARIMA for Price - Using log-prices to effectively model log-returns
+                # (2,1,2) on log-price is equivalent to (2,0,2) on log-returns
+                history_price = prices[-window - 10:]
+                log_history = np.log(history_price)
+                
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model = ARIMA(log_history, order=(2,1,2))
+                    model_fit = model.fit()
+                    fc_res = model_fit.get_forecast(steps=10)
+                
+                # Transform back from log-space to price-space
+                fc_mean = np.exp(fc_res.predicted_mean)
+                fc_ci = np.exp(fc_res.conf_int(alpha=0.05))
+            except Exception as e:
+                print(f"ARIMA failed for {symbol}: {str(e)}")
+                # Fallback to last price
+                last_p = history_price[-1] if len(history_price) > 0 else 0
+                fc_mean = np.full(10, last_p)
+                # Simple CI 1% fallback
+                fc_ci = np.zeros((10, 2))
+                fc_ci[:, 0] = last_p * 0.99
+                fc_ci[:, 1] = last_p * 1.01
 
             # GARCH Volatility Forecast
             try:
-                garch_params = fit_garch(log_rets[-window:])
-                vol_forecast_vals = forecast_garch(garch_params, log_rets[-window:], steps=10, ann_factor=MetricsEngine.get_annual_scaling(interval))
-                
-                # Historical vol for context
-                hist_vol = pd.Series(log_rets[-window:]**2).ewm(alpha=0.06).mean()
-                hist_vol = np.sqrt(hist_vol) * np.sqrt(MetricsEngine.get_annual_scaling(interval))
-                hist_vol = hist_vol.values
+                garch_data = log_rets[-window:]
+
+                if len(garch_data) < 20:
+                    raise ValueError(f"Insufficient data for GARCH: {len(garch_data)} points")
+
+                vol_forecast_vals, hist_vol = forecast_garch(
+                    garch_data,
+                    steps=10,
+                    ann_factor=MetricsEngine.get_annual_scaling(interval)
+                )
+
             except Exception as e:
-                logger.log("Symbol Diagnostics", "ERROR", f"GARCH failed: {e}")
+                logger.log("Symbol Diagnostics", "ERROR", f"GARCH failed for {symbol}: {str(e)}")
                 vol_forecast_vals = np.zeros(10)
-                vol_ci = np.zeros((10, 2))
-                hist_vol = np.zeros(window)
+                hist_vol = np.zeros(len(garch_data))
 
             p.set(80, message="Regime Classification...")
             
@@ -415,7 +448,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             p.set(90, message="Relationships...")
             
             # Relationships (Deprecated)
-            corrs = pd.Series()
+            corrs = pd.Series(dtype=float)
             coint_scores = []
             zscore_spreads = []
 
@@ -430,6 +463,10 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             for col in latest_metrics.columns:
                 latest_metrics[col] = z_score(latest_metrics[col])
 
+            # 7. Orderbook Status
+            p.set(95, message="Fetching Orderbook...")
+            book_status = manager.fetcher.get_books_status(symbol)
+
             # Pack Data
             data_pack = {
                 "sharpe": res_sharpe,
@@ -442,10 +479,23 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 "metrics_df": latest_metrics.tail(1).T.reset_index(),
                 "beta": beta_,
                 "alpha": alpha_,
-                "mn_cum_ret": mn_cum_ret if not mn_cum_ret.empty else pd.Series(),
-                "fc_price": {"hist": history_price, "fc": fc_mean, "ci": fc_ci},
-                "fc_vol": {"hist": hist_vol, "fc": vol_forecast_vals},
-                "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values}
+                "mn_cum_ret": mn_cum_ret if not mn_cum_ret.empty else pd.Series(dtype=float),
+                "fc_price": {
+                    "hist": history_price, 
+                    "fc": fc_mean, 
+                    "ci": fc_ci,
+                    "hist_ts": price_hist_ts,
+                    "fc_ts": forecast_ts
+                },
+                "fc_vol": {
+                    "hist": hist_vol, 
+                    "fc": vol_forecast_vals,
+                    "hist_ts": vol_hist_ts,
+                    "fc_ts": forecast_ts
+                },
+                "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values},
+                "impact_spread": book_status.get("impact_spread"),
+                "imbalance": book_status.get("orderbook_imbalance")
             }
             
             diag_data.set(data_pack)
@@ -492,6 +542,18 @@ def symbol_diagnostics_server(input, output, session, global_interval):
     def val_omega():
         d = diag_data.get()
         return f"{d.get('omega', 0):.2f}" if d else "-"
+
+    @render.text
+    def val_impact_spread():
+        d = diag_data.get()
+        v = d.get('impact_spread')
+        return f"{v*100:.4f}%" if v is not None else "-"
+
+    @render.text
+    def val_imbalance():
+        d = diag_data.get()
+        v = d.get('imbalance')
+        return f"{v*100:.2f}%" if v is not None else "-"
 
     @render_widget
     def plot_metrics():
@@ -553,9 +615,9 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             name='MN Cum Ret'
         ))
         fig.update_layout(
-            title="Market-Neutral Cumulative Return (Ex-PC1)",
+            # title="Market-Neutral Cumulative Return (Ex-PC1)",
             xaxis_title="Periods",
-            yaxis_title="Cumulative Return",
+            yaxis_title="Cumulative Idiosyncratic Return",
             height=450, width=700)
         return apply_theme(fig)
 
@@ -568,8 +630,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         fc = d['fc_price']['fc']
         ci = d['fc_price']['ci']
         
-        x_hist = np.arange(len(hist))
-        x_fc = np.arange(len(hist), len(hist) + len(fc))
+        x_hist = d['fc_price'].get('hist_ts', np.arange(len(hist)))
+        x_fc = d['fc_price'].get('fc_ts', np.arange(len(hist), len(hist) + len(fc)))
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=x_hist, y=hist, name="History", line=dict(color="cyan")))
@@ -577,7 +639,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         
         # CI
         fig.add_trace(go.Scatter(
-            x=np.concatenate([x_fc, x_fc[::-1]]),
+            x=np.concatenate([x_fc, x_fc[::-1]]), # This will work fine with strings
             y=np.concatenate([ci[:,1], ci[:,0][::-1]]),
             fill='toself',
             fillcolor='rgba(0, 255, 0, 0.1)',
@@ -599,8 +661,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
 
         diff = hist[-1] - fc[0]
         
-        x_hist = np.arange(len(hist))
-        x_fc = np.arange(len(hist), len(hist) + len(fc))
+        x_hist = d['fc_vol'].get('hist_ts', np.arange(len(hist)))
+        x_fc = d['fc_vol'].get('fc_ts', np.arange(len(hist), len(hist) + len(fc)))
         fc = fc + diff
 
         fig = go.Figure()
@@ -613,14 +675,14 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         if fc_ci is not None:
             steps = np.arange(1, len(fc) + 1)
 
-            k = 0.2
+            k = 0.1
             scale = k * np.sqrt(steps)
 
             upper = fc + (fc_ci - fc) * scale
             lower = fc - (fc_ci - fc) * scale
 
             fig.add_trace(go.Scatter(
-                x=np.concatenate([x_fc, x_fc[::-1]]),
+                x=np.concatenate([x_fc, x_fc[::-1]]), # This will work fine with strings
                 y=np.concatenate([upper, lower[::-1]]),
                 fill='toself',
                 fillcolor='rgba(255, 99, 71, 0.1)',

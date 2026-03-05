@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.figure_factory as ff
 from src.data import DataManager
-from ml_engine.analysis.correlation import MatrixEngine, DecompositionEngine
+from ml_engine.analysis.multivariate import MatrixEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,11 +34,12 @@ def multivariate_analysis_ui():
                         class_="btn-primary w-100 mt-3"
                     ),
 
-                    ui.input_text(
+                    ui.input_selectize(
                         "focus_corr_symbol",
                         "Focus Symbol",
-                        value="",
-                        placeholder="e.g. BTCUSDT"
+                        choices=[],
+                        options={"placeholder": "Select a symbol"},
+                        multiple=False
                     ),
 
                     ui.input_select(
@@ -76,7 +77,7 @@ def multivariate_analysis_ui():
                     ui.input_numeric(
                         "window_size",
                         "Window Size",
-                        value=1000,
+                        value=300,
                         min=10,
                         max=2000
                     ),
@@ -283,6 +284,7 @@ def multivariate_analysis_server(input, output, session):
         
         curr_sel_corr = sorted(list(selected_symbols_corr.get()))
         ui.update_selectize("corr_symbols", choices=all_syms, selected=curr_sel_corr)
+        ui.update_selectize("focus_corr_symbol", choices=[""] + curr_sel_corr)
         
         curr_sel_decomp = sorted(list(selected_symbols_decomp.get()))
         ui.update_selectize("decomp_symbols", choices=all_syms, selected=curr_sel_decomp)
@@ -536,7 +538,7 @@ def multivariate_analysis_server(input, output, session):
             template="plotly_dark"
         )
 
-        focus_sym = input.focus_corr_symbol().strip().upper()
+        focus_sym = (input.focus_corr_symbol() or "").strip().upper()
         if focus_sym:
             # Check if symbol exists in columns or index
             cols = list(clean_df.columns)
@@ -610,7 +612,7 @@ def multivariate_analysis_server(input, output, session):
             font=dict(family="Space Mono", color="white"),
             xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
             yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
-            height=500, width=1470
+            # width=1470
         )
         return fig
 

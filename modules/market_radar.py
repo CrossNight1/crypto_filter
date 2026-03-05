@@ -25,11 +25,12 @@ def market_radar_ui():
                         "Load Data",
                         class_="btn-primary w-100 mb-2"
                     ),
-                    ui.input_text(
+                    ui.input_selectize(
                         "focus_symbol",
                         "Focus Symbol",
-                        value="",
-                        placeholder="e.g. BTCUSDT"
+                        options={"placeholder": "Select a symbol"},
+                        choices=[],
+                        multiple=False
                     ),
 
                     ui.input_select(
@@ -62,14 +63,14 @@ def market_radar_ui():
                         "y_axis",
                         "Y Axis",
                         choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected=ALL_METRICS[2]
+                        selected=ALL_METRICS[1]
                     ),
 
                     ui.input_select(
                         "z_axis",
                         "Z Axis",
                         choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}},
-                        selected=ALL_METRICS[3]
+                        selected=ALL_METRICS[2]
                     ),
 
                     # ----- LOG SCALE (single row) -----
@@ -84,7 +85,7 @@ def market_radar_ui():
                     ui.input_switch(
                         "drop_zeros",
                         "Exclude Zero Metrics",
-                        value=True
+                        value=False
                     ),
                     ui.input_switch(
                         "show_regression",
@@ -96,7 +97,7 @@ def market_radar_ui():
                     ui.input_text(
                         "n_assets_radar",
                         "Top Volume",
-                        value="20",
+                        value="50",
                         placeholder="e.g. 20",
                         update_on="blur"
                     ),
@@ -146,11 +147,11 @@ def market_radar_ui():
                         class_="btn-primary w-100 mb-2"
                     ),
 
-                    ui.input_text(
+                    ui.input_selectize(
                         "rpg_focus_symbol",
                         "Focus Symbol",
-                        value="",
-                        placeholder="e.g. BTCUSDT"
+                        choices=[],
+                        multiple=False
                     ),
 
                     ui.input_select(
@@ -274,7 +275,11 @@ def market_radar_server(input, output, session, global_interval):
     def _initialize_symbols():
         # Only initialize with mandatory if we don't have symbols yet
         if not selected_symbols_radar.get():
-            selected_symbols_radar.set(set(MANDATORY_CRYPTO))
+            n = int(input.n_assets_radar() or 20)
+            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            new_syms = set(MANDATORY_CRYPTO).union(syms)
+            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
+            selected_symbols_radar.set(new_syms)
 
     @reactive.effect
     @reactive.event(input.n_assets_radar)
@@ -333,6 +338,8 @@ def market_radar_server(input, output, session, global_interval):
         all_syms = manager.get_universe()
         curr_sel = sorted(list(selected_symbols_radar.get()))
         ui.update_selectize("radar_symbols", choices=all_syms, selected=curr_sel)
+        ui.update_selectize("focus_symbol", choices=[""] + curr_sel)
+        ui.update_selectize("rpg_focus_symbol", choices=[""] + curr_sel)
 
     @reactive.effect
     @reactive.event(input.btn_calc_snapshot)
@@ -359,6 +366,8 @@ def market_radar_server(input, output, session, global_interval):
             # 2. Update UI
             all_syms = manager.get_universe()
             ui.update_selectize("radar_symbols", choices=all_syms, selected=syms)
+            ui.update_selectize("focus_symbol", choices=[""] + syms)
+            ui.update_selectize("rpg_focus_symbol", choices=[""] + syms)
             
             # 3. Sync data for these symbols (if needed/optional)
             p.set(20, message="Syncing data...", detail="Ensuring cache is up-to-date")
@@ -389,6 +398,8 @@ def market_radar_server(input, output, session, global_interval):
             # 2. Update UI
             all_syms = manager.get_universe()
             ui.update_selectize("rpg_symbols", choices=all_syms, selected=syms)
+            ui.update_selectize("rpg_focus_symbol", choices=[""] + syms)
+            ui.update_selectize("focus_symbol", choices=[""] + syms)
             
             # 3. Sync data for these symbols (if needed/optional)
             p.set(20, message="Syncing data...", detail="Ensuring cache is up-to-date")
@@ -400,17 +411,15 @@ def market_radar_server(input, output, session, global_interval):
 
     @reactive.effect
     def _sync_focus_symbol():
-        """Sync focus_symbol input with selected_symbol_data"""
-        symbol = input.focus_symbol().strip().upper()
+        symbol = input.focus_symbol()
         if symbol:
-            selected_symbol_data.set(symbol)
+            selected_symbol_data.set(symbol.upper())
 
     @reactive.effect
     def _sync_rpg_focus_symbol():
-        """Sync rpg_focus_symbol input with selected_rpg_focus_data"""
-        symbol = input.rpg_focus_symbol().strip().upper()
+        symbol = input.rpg_focus_symbol()
         if symbol:
-            selected_rpg_focus_data.set(symbol)
+            selected_rpg_focus_data.set(symbol.upper())
 
     @reactive.effect
     @reactive.event(input.btn_calc_snapshot)
@@ -575,7 +584,7 @@ def market_radar_server(input, output, session, global_interval):
             plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0)
             # px.scatter size must be positive
             z_norm = (plot_df[z] - plot_df[z].min()) / (plot_df[z].max() - plot_df[z].min())
-            plot_df['z_marker_size'] = z_norm * 15 + 5
+            plot_df['z_marker_size'] = z_norm + 1
             
             fig = px.scatter(
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
@@ -608,14 +617,15 @@ def market_radar_server(input, output, session, global_interval):
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
             height=600,
-            width=1470,
+            # width=1470,
             font=dict(family="Space Mono", color="white"),
-            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
-            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)"),
             clickmode='event+select'  # Enable click events
         )
+
+        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
                                
-        focus_sym = input.focus_symbol().strip().upper()
+        focus_sym = (input.focus_symbol() or "").strip().upper()
         selected_points = None
         unselected_opacity = 0.2
         selection_size = 10
@@ -666,8 +676,8 @@ def market_radar_server(input, output, session, global_interval):
             )
         )
 
-        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
-        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+        # fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+        # fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
  
         # --- Regression Line ---
         reg = snapshot_regression_params()
@@ -714,7 +724,7 @@ def market_radar_server(input, output, session, global_interval):
                 selected_symbol_data.set(symbol)
                 
                 # Update Focus Symbol input box
-                ui.update_text("focus_symbol", value=symbol)
+                ui.update_selectize("focus_symbol", selected=symbol)
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"Error handling chart click: {e}")
 
@@ -800,8 +810,12 @@ def market_radar_server(input, output, session, global_interval):
     def _populate_initial_symbols():
         # Use centralized universe instead of local inventory
         all_syms = manager.get_universe()
-        ui.update_selectize("radar_symbols", choices=all_syms, selected=MANDATORY_CRYPTO, server=True)
-        ui.update_selectize("rpg_symbols", choices=all_syms, selected=MANDATORY_CRYPTO, server=True)
+        n = int(input.n_assets_radar() or 20)
+        syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+        new_syms = set(MANDATORY_CRYPTO).union(syms)
+        new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
+        ui.update_selectize("radar_symbols", choices=all_syms, selected=sorted(list(new_syms)), server=True)
+        ui.update_selectize("rpg_symbols", choices=all_syms, selected=sorted(list(new_syms)), server=True)
 
     @reactive.effect
     @reactive.event(input.btn_gen_rpg)
@@ -927,7 +941,7 @@ def market_radar_server(input, output, session, global_interval):
         df = rpg_data.get()
         if df.empty: return go.Figure()
         
-        focus_sym = input.rpg_focus_symbol().strip().upper()
+        focus_sym = (input.rpg_focus_symbol() or "").strip().upper()
         has_focus = focus_sym in df['Symbol'].str.upper().values
         
         fig = px.line(
@@ -949,11 +963,12 @@ def market_radar_server(input, output, session, global_interval):
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
             height=600,
-            width=1470,
-            font=dict(family="Space Mono", color="white"),
-            xaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)"),
-            yaxis=dict(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
+            # width=1470,
+            font=dict(family="Space Mono", color="white")
         )
+
+        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
+        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
 
         for trace in fig.data:
             if not isinstance(trace, go.Scatter) or trace.name not in df['Symbol'].unique():

@@ -25,6 +25,7 @@ class BinanceFuturesFetcher:
     TICKER_24H = "/fapi/v1/ticker/24hr"
     KLINES = "/fapi/v1/klines"
     EXCHANGE_INFO = "/fapi/v1/exchangeInfo"
+    ORDERBOOK = "/fapi/v1/depth"
     
     def __init__(self, rate_limit_delay: float = 0.05):
         self.session = requests.Session()
@@ -39,6 +40,69 @@ class BinanceFuturesFetcher:
         except Exception as e:
             logger.error(f"Request failed {endpoint}: {e}")
             return {}
+
+    def get_orderbooks(self, symbol: str) -> pd.DataFrame:
+        """Get orderbook for a single symbol"""
+        data = self._request(self.ORDERBOOK, {'symbol': symbol, 'limit': 1000})
+        if not data: return pd.DataFrame()
+        
+        bids = pd.DataFrame(data.get('bids', []), columns=['price', 'qty'], dtype=float)
+        asks = pd.DataFrame(data.get('asks', []), columns=['price', 'qty'], dtype=float)
+        
+        bids['side'] = 'bid'
+        asks['side'] = 'ask'
+        return pd.concat([bids, asks])
+
+    def get_books_status(self, symbol: str, impact_usd: float = 1000, imbalance_pct: float = 0.05):
+        """
+        Calculate impact spread and orderbook imbalance.
+        impact_usd: USD size to calculate average execution price.
+        imbalance_pct: range around mid-price to calculate volume imbalance.
+        """
+        df = self.get_orderbooks(symbol)
+        if df.empty: return {}
+
+        bids = df[df["side"] == "bid"].sort_values("price", ascending=False)
+        asks = df[df["side"] == "ask"].sort_values("price", ascending=True)
+        if bids.empty or asks.empty: return {}
+
+        mid = (bids.iloc[0]["price"] + asks.iloc[0]["price"]) / 2
+
+        def calc_impact_price(book, target_usd):
+            notional = 0.0
+            total_qty = 0.0
+            for _, row in book.iterrows():
+                p, q = row["price"], row["qty"]
+                v = p * q
+                if notional + v >= target_usd:
+                    needed_v = target_usd - notional
+                    total_qty += needed_v / p
+                    notional = target_usd
+                    break
+                total_qty += q
+                notional += v
+            return target_usd / total_qty if notional >= target_usd and total_qty > 0 else None
+
+        avg_ask = calc_impact_price(asks, impact_usd)
+        avg_bid = calc_impact_price(bids, impact_usd)
+        
+        impact_spread = (avg_ask - avg_bid) / mid if (avg_ask and avg_bid) else None
+        
+        # Imbalance
+        lower = mid * (1 - imbalance_pct)
+        upper = mid * (1 + imbalance_pct)
+        bid_liq = bids[bids.price >= lower]["qty"].sum() * mid
+        ask_liq = asks[asks.price <= upper]["qty"].sum() * mid
+        total_liq = bid_liq + ask_liq
+        imbalance = (bid_liq - ask_liq) / total_liq if total_liq > 0 else None
+
+        return {
+            "mid_price": mid,
+            "impact_spread": impact_spread,
+            "orderbook_imbalance": imbalance,
+            "bid_liquidity": bid_liq,
+            "ask_liquidity": ask_liq
+        }
 
     def get_top_volume_symbols(self, top_n: int = 50, exclude: List[str] = None) -> List[str]:
         """Get top N symbols by 24h Quote (USDT) Volume"""

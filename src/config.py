@@ -76,16 +76,20 @@ METRIC_LABELS = {
     'vama': 'VAMA',
     'liquidity_impact': 'Liquidity Impact',
     'vol_rank': 'Volatility Rank',
+    'max_drawdown': 'Max Drawdown',
+    'avg_drawdown': 'Average Drawdown',
     'None': 'None'
 }
 
 # List of all available numeric metrics for axes
 ALL_METRICS = [
-    'volatility', 'fip', 
+    'price_zscore', 'vam',
+    'volatility','vol_imbalance', 'fip', 
     'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
-    'rsi_norm', 'atr_norm', 'cmf', 'vwap_z', 'price_zscore', 'vam', 'skewness',
+    'rsi_norm', 'atr_norm', 'cmf', 'vwap_z', 'skewness',
+    'autocorr_1', 'autocorr_5', 'imbalance_bar', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank',
+    'max_drawdown', 'avg_drawdown',
     'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20',
-    'autocorr_1', 'autocorr_5', 'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank'
 ]
 
 DEFAULT_FEATURES = [
@@ -94,5 +98,6 @@ DEFAULT_FEATURES = [
     'atr_norm', 'vol_atr', 'vama', 'cmf', 'price_zscore', 'vam', 'skewness',
     'sign_lag1', 'sign_lag2', 'sign_lag3',
     'autocorr_1', 'autocorr_5', 
-    'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank'
+    'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank',
+    'max_drawdown', 'avg_drawdown'
 ]

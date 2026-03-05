@@ -38,6 +38,33 @@ class MatrixEngine:
         return r
 
     @staticmethod
+    def build_residual_cache(wide):
+
+        cols = wide.columns
+
+        for i in cols:
+            for j in cols:
+
+                if i == j:
+                    continue
+
+                key = (i, j)
+                if key in MatrixEngine._residual_cache:
+                    continue
+
+                df = pd.concat([wide[i], wide[j]], axis=1).dropna()
+                if len(df) < 5:
+                    continue
+
+                y = df.iloc[:,0].values
+                x = df.iloc[:,1].values
+
+                X = np.vstack([x, np.ones(len(x))]).T
+                beta = np.linalg.lstsq(X, y, rcond=None)[0]
+
+                MatrixEngine._residual_cache[key] = y - X @ beta
+
+    @staticmethod
     def calculate_coint_matrix(data_map, window_size=50):
 
         def _adf_tstat(r):
@@ -315,12 +342,16 @@ class MatrixEngine:
         """
         if weights is None:
             weights = {
-                "corr": 0.2,
-                "partial": 0.1,
+                "corr": 0.25,
+                "partial": 0.0,
                 "halflife": 0.2,
-                "coint": 0.3,
-                "zscore": 0.2,
+                "coint": 0.25,
+                "zscore": 0.3,
             }
+        
+        wide = np.log(pd.DataFrame(data_map)[-window_size:])
+        MatrixEngine.clear_residual_cache()
+        MatrixEngine.build_residual_cache(wide)
 
         # Compute base matrices
         corr = MatrixEngine.calculate_matrix(data_map, method="pearson", window_size=window_size)
@@ -341,15 +372,17 @@ class MatrixEngine:
         hl_s[mask] = 1.0 / halflife[mask]
 
         # Normalize helper
-        def normalize(mat):
+        def normalize(mat, v_min=None, v_max=None):
             # Replace inf with nan for min/max calculation
             vals = mat.values
             vals = vals[np.isfinite(vals)]
             if len(vals) == 0:
                 return mat * 0
             
-            v_min = np.min(vals)
-            v_max = np.max(vals)
+            if not v_min:
+                v_min = np.min(vals)
+            if not v_max:
+                v_max = np.max(vals)
             
             if v_max - v_min == 0:
                 return mat * 0
@@ -358,11 +391,11 @@ class MatrixEngine:
             normed = (mat.clip(v_min, v_max) - v_min) / (v_max - v_min)
             return normed.fillna(0)
 
-        corr_s = normalize(corr_s)
-        partial_s = normalize(partial_s)
-        coint_s = normalize(coint_s)
-        z_s = normalize(z_s)
-        hl_s = normalize(hl_s)
+        corr_s = normalize(corr_s, -1, 1)
+        partial_s = normalize(partial_s, -0.5, 0.5)
+        coint_s = normalize(coint_s, 0, 5)
+        z_s = normalize(z_s, -2, 2)
+        hl_s = normalize(hl_s, 5, 100)
 
         # Weighted aggregation
         score = (

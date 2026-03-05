@@ -6,11 +6,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
 from src.data import DataManager
-from src.metrics import MetricsEngine
 from statsmodels.tsa.stattools import coint, adfuller
 from scipy import stats
 from scipy.stats import gaussian_kde, rankdata
+from src.metrics import MetricsEngine, copula_cond_probs
 from src.config import AVAILABLE_INTERVALS
+from src.logger import logger
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -38,14 +39,16 @@ def pair_radar_ui():
                            choices={"ratio": "Ratio", "spread": "Spread"}, selected="spread"),
             ui.hr(),
             ui.input_numeric("rolling_window", "Rolling Window", value=320, min=5),
-            ui.input_numeric("pair_window", "Window", value=1200, min=30),
+            ui.input_numeric("pair_window", "Window", value=500, min=30),
+        ),
+        ui.card(
+            ui.card_header("Pair Analysis Diagnostics"),
+            ui.output_ui("pair_metrics_viz"),
+            min_height="50px",
+            max_height="150px"
         ),
         ui.navset_card_pill(
             ui.nav_panel("Dashboard",
-                ui.card(
-                    ui.card_header("Pair Diagnostics"),
-                    ui.output_ui("pair_metrics_viz")
-                ),
                 ui.card(
                     ui.card_header("Statistical Analytics Dashboard"),
                     output_widget("pair_main_chart"),
@@ -74,8 +77,17 @@ def pair_radar_ui():
                                 value=10,
                                 min=1
                             ),
-
+                            ui.hr(),
+                            ui.input_select("copula_type", "Copula Type", 
+                                          choices={"gaussian": "Gaussian", "t": "Student-t", 
+                                                   "clayton": "Clayton", "gumbel": "Gumbel"}, 
+                                          selected="t"),
+                            ui.input_numeric("copula_param", "Copula Parameter (df/theta)", value=2.0, min=0.1, step=0.1),
                             full_screen=False
+                        ),
+                        ui.card(
+                            ui.card_header("Real-time Prob"),
+                            ui.output_ui("copula_prob_info")
                         )
                     ),
                     ui.column(
@@ -173,6 +185,10 @@ def pair_radar_server(input, output, session, global_interval):
 
             synthetic = pd.DataFrame(index=common)
             
+            if df_b["close"].std() == 0:
+                ui.notification_show("Asset B has zero variance. Cannot calculate regression.", type="error")
+                return
+
             slope, intercept, r_val, p_val, std_err = stats.linregress(df_b["close"], df_a["close"])
             beta = slope
             
@@ -222,18 +238,26 @@ def pair_radar_server(input, output, session, global_interval):
             lambda_coef = np.polyfit(spread_lag, spread_ret, 1)[0]
             half_life = -np.log(2) / lambda_coef if lambda_coef < 0 else np.nan
 
-            roll_window = 60
-            rolling_beta = []
-            for i in range(roll_window, len(y)):
-                b, _, _, _, _ = stats.linregress(x[i-roll_window:i], y[i-roll_window:i])
-                rolling_beta.append(b)
-
-            beta_stability = np.std(rolling_beta) if rolling_beta else np.nan
+            beta_stability = np.nan
+            roll_window = window
+            if len(y) > roll_window:
+                rolling_beta = []
+                for i in range(roll_window, len(y)):
+                    window_x = x[i-roll_window:i]
+                    window_y = y[i-roll_window:i]
+                    if np.std(window_x) == 0:
+                        rolling_beta.append(np.nan)
+                    else:
+                        b, _, _, _, _ = stats.linregress(window_x, window_y)
+                        rolling_beta.append(b)
+                
+                beta_stability = np.nanstd(rolling_beta) if rolling_beta else np.nan
 
             # Local zscore for SignalRate metric
             z_local = calculate_rolling_zscore(synthetic["close"], window)
             z_vals = z_local.dropna().values
-            signal_rate = np.sum(np.abs(z_vals) > 2) / len(z_vals) if len(z_vals) > 0 else 0
+            p_correlation = np.corrcoef(x, y)[0, 1]
+            r_correlation = np.corrcoef(synthetic["log_ret_a"].dropna(), synthetic["log_ret_b"].dropna())[0, 1]
 
             r2 = r_val**2
 
@@ -243,7 +267,8 @@ def pair_radar_server(input, output, session, global_interval):
                 "HalfLife": half_life,
                 "SpreadVol": spread_vol,
                 "BetaStability": beta_stability,
-                "SignalRate": signal_rate,
+                "P_Correlation": p_correlation,
+                "R_Correlation": r_correlation,
                 "ADF_P": adf_p,
                 "R2": r2
             }
@@ -390,7 +415,7 @@ def pair_radar_server(input, output, session, global_interval):
             plot_bgcolor="#0b3d91",
             font=dict(family="Space Mono", color="white"),
             height=800,
-            width=1500,
+            width=1470,
             margin=dict(l=50, r=50, t=50, b=50)
         )
 
@@ -418,7 +443,8 @@ def pair_radar_server(input, output, session, global_interval):
             "HalfLife",
             "SpreadVol",
             "BetaStability",
-            # "SignalRate"
+            "P_Correlation",
+            "R_Correlation"
         ]
 
         boxes = []
@@ -431,113 +457,244 @@ def pair_radar_server(input, output, session, global_interval):
                         value=f"{v:.2f}",
                         icon="bar-chart",
                         color="cyan",
-                        width=2
+                        width=1,
+                        class_="small-box"
                     )
                 )
+        # Put all boxes in a single row using flexbox for maximum compactness
+        return ui.div(
+            *boxes,
+            class_="d-flex flex-row flex-nowrap gap-1 overflow-auto justify-content-between",
+            style="padding-bottom: 5px;"
+        )
 
-        # Put all boxes in a single row using layout_columns for better scaling
-        return ui.layout_columns(*boxes, fill=False)
-
-    @render_widget
-    def pair_copula_chart():
+    @reactive.calc
+    def copula_stats():
         df = pair_data.get()
-        if df.empty:
-            return None
+        if df.empty: return None
 
         mode = input.copula_mode()
         w = max(input.pair_window(), 10)
         df_plot = df.tail(w).copy()
-        if input.r_window():
-            r_window = max(input.r_window(), 1)
-        else:
-            r_window = 1
+        
+        r_window = max(input.r_window(), 1) if input.r_window() else 1
 
         if mode == "price":
-            x = np.exp(df_plot["price_a"].values)
-            y = np.exp(df_plot["price_b"].values)
+            # Note: price_a in synthetic is log(price)
+            x_raw = np.exp(df_plot["price_a"].values)
+            y_raw = np.exp(df_plot["price_b"].values)
             title_suffix = " (Price Levels)"
         else:
             df_plot = df_plot.dropna(subset=["log_ret_a", "log_ret_b"])
             if len(df_plot) < 2 or r_window < 2:
-                # If window is 1 or data too short, we can't compute std reliably
-                # Fallback to simple returns or notify user
-                x = df_plot["log_ret_a"].values
-                y = df_plot["log_ret_b"].values
+                x_raw = df_plot["log_ret_a"].values
+                y_raw = df_plot["log_ret_b"].values
                 title_suffix = " (Raw Log Returns)"
             else:
-                eps = 1e-9
-                x = (df_plot["log_ret_a"].rolling(r_window).sum().dropna() / (df_plot["log_ret_a"].rolling(r_window).std().dropna() + eps)).values
-                y = (df_plot["log_ret_b"].rolling(r_window).sum().dropna() / (df_plot["log_ret_b"].rolling(r_window).std().dropna() + eps)).values
+                x_raw = df_plot["log_ret_a"].rolling(r_window).sum().dropna().values
+                y_raw = df_plot["log_ret_b"].rolling(r_window).sum().dropna().values
                 title_suffix = " (Log Returns)"
 
-        if len(x) < 2:
+        if len(x_raw) < 1: 
             return None
 
-        # Sanitize inputs before ranking to avoid all-NaN ranking
-        x = _sanitize(x)
-        y = _sanitize(y)
+        x = _sanitize(x_raw)
+        y = _sanitize(y_raw)
 
-        rank_x = rankdata(x) / (len(x) + 1)
-        rank_y = rankdata(y) / (len(y) + 1)
+        # Ranks (U, V)
+        u_hist = rankdata(x) / (len(x) + 1)
+        v_hist = rankdata(y) / (len(y) + 1)
 
-        fig = go.Figure()
+        u_curr = u_hist[-1]
+        v_curr = v_hist[-1]
 
+        # Conditional Probability
+        c_type = input.copula_type()
+        c_param = input.copula_param()
+        
+        p_uv, p_vu = 0.5, 0.5
+        try:
+            kwargs = {}
+            if c_type == "t": kwargs["df"] = c_param
+            else: kwargs["theta"] = c_param
+
+            # Calculate theoretical conditional probs
+            p_uv, p_vu = copula_cond_probs(u_hist, v_hist, u_curr, v_curr, method=c_type, **kwargs)
+        except Exception as e:
+            logger.log("Pair Radar", "ERROR", f"Copula Prob Error: {e}")
+            p_uv, p_vu = 0.5, 0.5
+
+        # --- KDE for Marginals ---
+        # Instead of flat histograms of ranks, we show the density of the original data 
+        # mapped to the rank axis.
+        def get_kde_path(vals, ranks):
+            if len(vals) < 5: return np.zeros_like(ranks)
+            kde = gaussian_kde(vals, bw_method=0.3)
+            # Evaluate KDE at the original points
+            dens = kde.evaluate(vals)
+            # Normalize for visualization
+            if dens.max() > 0: dens = dens / dens.max()
+            return dens
+
+        dens_a = get_kde_path(x, u_hist)
+        dens_b = get_kde_path(y, v_hist)
+
+        return {
+            "u": u_hist, "v": v_hist, 
+            "u_curr": u_curr, "v_curr": v_curr,
+            "x": x, "y": y,
+            "p_uv": p_uv,
+            "p_vu": p_vu,
+            "dens_a": dens_a,
+            "dens_b": dens_b,
+            "title_suffix": title_suffix
+        }
+
+    @render.ui
+    def copula_prob_info():
+        s = copula_stats()
+        if not s:
+            uv_str = "---"
+        else:
+            p_uv = s["p_uv"]
+            p_vu = s["p_vu"]
+            uv_str = f"{p_uv:.4f}"
+            vu_str = f"{p_vu:.4f}"
+
+        return ui.div(
+            ui.value_box(
+                "P(U \u2264 u | V=v)", 
+                uv_str,
+                theme="info",
+                style="flex: 1",
+                class_="small-box"
+            ),
+            ui.value_box(
+                "P(V \u2264 v | U=u)", 
+                vu_str,
+                theme="info",
+                style="flex: 1",
+                class_="small-box"
+            ),
+            class_="d-flex flex-row gap-2"
+        )
+
+    @render_widget
+    def pair_copula_chart():
+        s = copula_stats()
+        if not s: return None
+
+        u, v = s["u"], s["v"]
+        u_curr, v_curr = s["u_curr"], s["v_curr"]
+        x, y = s["x"], s["y"]
+        p_uv, p_vu = s["p_uv"], s["p_vu"]
+        dens_a, dens_b = s["dens_a"], s["dens_b"]
+        title_suffix = s["title_suffix"]
+
+        # Manual subplots for scatter + marginals
+        fig = make_subplots(
+            rows=2, cols=2,
+            column_widths=[0.85, 0.15],
+            row_heights=[0.15, 0.85],
+            shared_xaxes=True,
+            shared_yaxes=True,
+            horizontal_spacing=0.01,
+            vertical_spacing=0.01
+        )
+
+        # Main Scatter (Row 2, Col 1)
         fig.add_trace(go.Scatter(
-            x=rank_x,
-            y=rank_y,
+            x=u, y=v,
             mode='markers',
-            marker=dict(
-                size=7, 
-                color='cyan', 
-                opacity=0.6,
-                line=dict(width=0.5, color='rgba(255,255,255,0.2)')
-            ),
-            text=[f"A: {v1:,.4f}<br>B: {v2:,.4f}" for v1, v2 in zip(x, y)],
-            hovertemplate=(
-                "Rank A: %{x:.2f}<br>"
-                "Rank B: %{y:.2f}<br>"
-                "%{text}<extra></extra>"
-            ),
-            name="Rank Scatter"
-        ))
+            marker=dict(size=7, color='cyan', opacity=0.4, line=dict(width=0.4, color='white')),
+            text=[f"A: {v1:,.4f}<br>B: {v2:,.4f}<br>Rank A: {r1:.3f}<br>Rank B: {r2:.3f}" for v1, v2, r1, r2 in zip(x, y, u, v)],
+            hovertemplate="%{text}<extra></extra>",
+            name="Joint Distribution"
+        ), row=2, col=1)
 
-        # Path of last 10 steps
-        if len(rank_x) >= 10:
+        # Path
+        if len(u) >= 10:
             fig.add_trace(go.Scatter(
-                x=rank_x[-10:],
-                y=rank_y[-10:],
+                x=u[-10:], y=v[-10:],
                 mode='lines+markers',
-                line=dict(color='yellow', width=1.5, dash='dot', shape='spline', smoothing=1.1),
-                marker=dict(size=6, color='yellow'),
-                # name="Last 10 Ticks",
+                line=dict(color='yellow', width=1.2, dash='dot'),
+                marker=dict(size=5, color='yellow'),
+                name="Last 10",
                 hoverinfo='skip'
-            ))
+            ), row=2, col=1)
 
-        # Current point
+        # Current
         fig.add_trace(go.Scatter(
-            x=[rank_x[-1]],
-            y=[rank_y[-1]],
+            x=[u_curr], y=[v_curr],
             mode='markers',
-            marker=dict(size=12, color='red', symbol='cross', line=dict(width=2, color='white')),
-            text=[f"Current A: {x[-1]:,.4f}<br>Current B: {y[-1]:,.4f}"],
+            marker=dict(size=14, color='red', symbol='cross', line=dict(width=2, color='white')),
+            text=[f"CURRENT<br>A: {x[-1]:,.4f}<br>B: {y[-1]:,.4f}<br>Rank A: {u_curr:.4f}<br>Rank B: {v_curr:.4f}<br>P(U|V): {p_uv:.4f}<br>P(V|U): {p_vu:.4f}"],
             hovertemplate="%{text}<extra></extra>",
             name="Current"
-        ))
+        ), row=2, col=1)
+
+        # Marginals as KDE Areas
+        # X Marginal (Row 1, Col 1)
+        sort_idx_a = np.argsort(u)
+        fig.add_trace(go.Scatter(
+            x=u[sort_idx_a], y=dens_a[sort_idx_a],
+            fill='tozeroy', 
+            line=dict(color='cyan', width=1),
+            fillcolor='rgba(0, 255, 255, 0.2)',
+            name="Rank A Density",
+            hoverinfo='skip'
+        ), row=1, col=1)
+        
+        # Y Marginal (Row 2, Col 2)
+        sort_idx_b = np.argsort(v)
+        fig.add_trace(go.Scatter(
+            y=v[sort_idx_b], x=dens_b[sort_idx_b], # Swap x/y for vertical marginal
+            fill='tozerox', 
+            line=dict(color='cyan', width=1),
+            fillcolor='rgba(0, 255, 255, 0.2)',
+            name="Rank B Density",
+            hoverinfo='skip'
+        ), row=2, col=2)
+
+        # Refined crosshairs
+        fig.add_vline(x=u_curr, line_dash="dash", line_color="rgba(255,255,255,0.4)", line_width=1, row=2, col=1)
+        fig.add_hline(y=v_curr, line_dash="dash", line_color="rgba(255,255,255,0.4)", line_width=1, row=2, col=1)
 
         fig.update_layout(
-            template="plotly_dark",
-            showlegend=False,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
-            xaxis_title=f"Rank {input.symbol_a()}{title_suffix}",
-            yaxis_title=f"Rank {input.symbol_b()}{title_suffix}",
-            height=800,
+            height=850,
             width=1090,
-            xaxis=dict(gridcolor="rgba(255,255,255,0.1)", range=[-0.02, 1.02], zeroline=False),
-            yaxis=dict(gridcolor="rgba(255,255,255,0.1)", range=[-0.02, 1.02], zeroline=False),
-            font=dict(family="Space Mono")
+            showlegend=False,
+            template="plotly_dark",
+            font=dict(family="Space Mono", color="white")
         )
+
+        # Axis Styling - High visibility zerolines
+        axis_style = dict(
+            gridcolor="rgba(255, 255, 255, 0.1)",
+            zeroline=True,
+            zerolinecolor="rgba(255, 255, 255, 0.4)",
+            zerolinewidth=1.5,
+            range=[-0.02, 1.02],
+            showline=True,
+            linecolor="rgba(255,255,255,0.2)"
+        )
+        fig.update_xaxes(axis_style, row=2, col=1, title_text=f"(U) Rank {input.symbol_a()} {title_suffix}")
+        fig.update_yaxes(axis_style, row=2, col=1, title_text=f"(V) Rank {input.symbol_b()} {title_suffix}")
+        
+        # Marginal axes hidden but styled with white low-opacity grid
+        m_axis_style = dict(
+            showticklabels=False, 
+            zeroline=True, 
+            zerolinecolor="rgba(255, 255, 255, 0.4)",
+            gridcolor="rgba(255, 255, 255, 0.2)", # Increased opacity
+            showgrid=True
+        )
+        fig.update_xaxes(m_axis_style, row=1, col=1)
+        fig.update_yaxes(m_axis_style, row=1, col=1)
+        fig.update_xaxes(m_axis_style, row=2, col=2)
+        fig.update_yaxes(m_axis_style, row=2, col=2)
 
         return fig
 
@@ -594,7 +751,7 @@ def pair_radar_server(input, output, session, global_interval):
             shared_xaxes=True,
             vertical_spacing=0.03,
             row_heights=[0.6, 0.2, 0.2],
-            specs=[[{"secondary_y": True}], [{}], [{}]]
+            specs=[[{"secondary_y": False}], [{}], [{}]]
         )
 
         # --- Row 1: Performance Comparison ---
@@ -669,13 +826,13 @@ def pair_radar_server(input, output, session, global_interval):
             plot_bgcolor="#0b3d91",
             font=dict(family="Space Mono", color="white"),
             height=800,
-            width=1500,
+            width=1470,
             margin=dict(l=50, r=50, t=50, b=50),
             showlegend=True,
             legend=dict(
                 orientation="h",
                 yanchor="top",
-                y=-0.08,
+                y=-0.12,
                 xanchor="center",
                 x=0.5
             )

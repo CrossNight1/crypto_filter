@@ -268,11 +268,25 @@ class MetricsEngine:
         if should_calc('price_zscore'):
             res['price_zscore'] = (close - close.rolling(window=window).mean()) / close.rolling(window=window).std()
         
-        # ADF Statistics
+        # 271. ADF Statistics
         if should_calc('adf_hist') or should_calc('adf_stat'):
             hist, tau, _ = MetricsEngine.calculate_custom_adf_series(close.values, lookback=window)
             if should_calc('adf_hist'): res['adf_hist'] = hist.values
             if should_calc('adf_stat'): res['adf_stat'] = tau.values
+
+        # 272. Rolling Drawdown Metrics
+        if should_calc('max_drawdown') or should_calc('avg_drawdown'):
+            # MDD(t) = (Price(t) / RollingMax(t)) - 1
+            rolling_max = low.rolling(window=window, min_periods=1).max()
+            drawdowns = (low / rolling_max) - 1.0
+            
+            if should_calc('max_drawdown'):
+                # Max drawdown in the rolling window
+                res['max_drawdown'] = drawdowns.rolling(window=window, min_periods=1).min()
+            
+            if should_calc('avg_drawdown'):
+                # Average of drawdown events (where DD < 0)
+                res['avg_drawdown'] = drawdowns.where(drawdowns < 0).rolling(window=window, min_periods=1).mean()
 
         return res
 
@@ -549,7 +563,7 @@ class MetricsEngine:
         Returns a Series of values indexed by the original index.
         """
         if df.empty or len(df) < 2:
-             return pd.Series()
+             return pd.Series(dtype=float)
              
         # Clean prices: ffill is safest for time series continuity
         df = df.copy()
@@ -568,7 +582,7 @@ class MetricsEngine:
             if metric_name == 'count':
                 res = pd.Series(len(df), index=df.index)
             else:
-                return pd.Series()
+                return pd.Series(dtype=float)
             
         # Apply Step (Stride)
         if step > 1:
@@ -622,3 +636,82 @@ class MetricsEngine:
                 print(f"Error calculating metrics for {symbol}: {e}")
                 
         return pd.DataFrame(results)
+
+
+import numpy as np
+from scipy.stats import norm, t
+
+def copula_cond_probs(u_hist, v_hist, u_curr, v_curr, method="gaussian", **kwargs):
+    """
+    Compute conditional probabilities:
+        P(U <= u_curr | V=v_curr) and P(V <= v_curr | U=u_curr)
+    
+    Parameters
+    ----------
+    u_hist, v_hist : array-like
+        Historical percentiles (0-1)
+    u_curr, v_curr : float
+        Current percentiles (0-1)
+    method : str
+        Copula type: "gaussian", "t", "clayton", "gumbel"
+    kwargs : dict
+        Extra parameters:
+            - For "t": df = degrees of freedom
+            - For "clayton"/"gumbel": theta = copula parameter (>0)
+
+    Returns
+    -------
+    tuple
+        (P(U <= u_curr | V=v_curr), P(V <= v_curr | U=u_curr))
+    """
+    u_hist = np.asarray(u_hist)
+    v_hist = np.asarray(v_hist)
+    
+    if method.lower() == "gaussian":
+        z1_hist = norm.ppf(u_hist)
+        z2_hist = norm.ppf(v_hist)
+        z1_curr = norm.ppf(u_curr)
+        z2_curr = norm.ppf(v_curr)
+        rho = np.corrcoef(z1_hist, z2_hist)[0,1]
+
+        p_uv = norm.cdf((z1_curr - rho * z2_curr)/np.sqrt(1 - rho**2))
+        p_vu = norm.cdf((z2_curr - rho * z1_curr)/np.sqrt(1 - rho**2))
+        return p_uv, p_vu
+
+    elif method.lower() == "t":
+        df = kwargs.get("df", 5)
+        z1_hist = t.ppf(u_hist, df)
+        z2_hist = t.ppf(v_hist, df)
+        z1_curr = t.ppf(u_curr, df)
+        z2_curr = t.ppf(v_curr, df)
+        rho = np.corrcoef(z1_hist, z2_hist)[0,1]
+
+        cond_var_uv = ((df + z2_curr**2)/(df+1))*(1 - rho**2)
+        cond_mean_uv = rho * z2_curr
+        cond_var_vu = ((df + z1_curr**2)/(df+1))*(1 - rho**2)
+        cond_mean_vu = rho * z1_curr
+
+        p_uv = t.cdf(z1_curr, df+1, loc=cond_mean_uv, scale=np.sqrt(cond_var_uv))
+        p_vu = t.cdf(z2_curr, df+1, loc=cond_mean_vu, scale=np.sqrt(cond_var_vu))
+        return p_uv, p_vu
+
+    elif method.lower() == "clayton":
+        theta = kwargs.get("theta", 2)
+        if theta <= 0:
+            raise ValueError("Clayton copula θ must be > 0")
+
+        p_uv = (u_curr**(-theta) + v_curr**(-theta) - 1)**(-(1+1/theta))
+        p_vu = (v_curr**(-theta) + u_curr**(-theta) - 1)**(-(1+1/theta))
+        return p_uv, p_vu
+
+    elif method.lower() == "gumbel":
+        theta = kwargs.get("theta", 2)
+        if theta < 1:
+            raise ValueError("Gumbel copula θ must be ≥ 1")
+
+        p_uv = np.exp(- (( (-np.log(u_curr))**theta + (-np.log(v_curr))**theta )**(1/theta) - (-np.log(v_curr))) )
+        p_vu = np.exp(- (( (-np.log(v_curr))**theta + (-np.log(u_curr))**theta )**(1/theta) - (-np.log(u_curr))) )
+        return p_uv, p_vu
+
+    else:
+        raise ValueError(f"Unknown copula method: {method}")

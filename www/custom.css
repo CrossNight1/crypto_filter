@@ -619,3 +619,35 @@ input::placeholder {
     color: white !important;
     opacity: 0.5 !important;
 }
+
+.small-box {
+    min-width: 90px !important;
+    max-width: 180px !important;
+    flex: 1 1 0 !important;
+    margin-bottom: 0 !important;
+}
+
+.small-box .card-body {
+    padding: 4px 8px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    align-items: center !important;
+    text-align: center !important;
+}
+
+.small-box .value-box-title {
+    font-size: 0.9rem !important;
+    margin-top: -15px !important;
+    margin-bottom: 15px !important;
+}
+
+.small-box .value-box-value {
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+}
+
+.small-box .bi {
+    font-size: 1rem !important;
+    margin-bottom: 2px !important;
+}
