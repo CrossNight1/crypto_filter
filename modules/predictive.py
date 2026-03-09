@@ -37,7 +37,7 @@ from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, ca
 def meta_sizing_cal(meta_probs):
     """Calibrate meta probabilities to sizing"""
     # return np.clip(2 * meta_probs - 1, 0, 1)
-    return np.where(meta_probs > 0.5, 1, 0)
+    return np.where(meta_probs > 0.5, meta_probs, 0)
 
 def recursive_unwrap(model):
     """Recursively peel off model wrappers to find the base model for SHAP."""
@@ -47,6 +47,37 @@ def recursive_unwrap(model):
     if hasattr(model, 'model'):
         return recursive_unwrap(model.model)
     return model
+
+class CombinedLongShortModelWrapper:
+    def __init__(self, model_long, model_short):
+        self.model_long = model_long
+        self.model_short = model_short
+        self.classes_ = np.array([-1, 0, 1])
+        
+    def predict_proba(self, X):
+        p_long = self.model_long.predict_proba(X)
+        p_short = self.model_short.predict_proba(X)
+        
+        c_l = {c: i for i, c in enumerate(self.model_long.classes_)}
+        c_s = {c: i for i, c in enumerate(self.model_short.classes_)}
+        
+        prob_long = p_long[:, c_l[1]] if 1 in c_l else np.zeros(len(X))
+        prob_short = p_short[:, c_s[-1]] if -1 in c_s else np.zeros(len(X))
+        prob_neutral = 1.0 - (prob_long + prob_short)
+        
+        total = prob_long + prob_short + prob_neutral
+        total[total == 0] = 1e-9
+        return np.column_stack([prob_short/total, prob_neutral/total, prob_long/total])
+        
+    def predict(self, X):
+        p_long = self.model_long.predict(X)
+        p_short = self.model_short.predict(X)
+        
+        out = np.zeros(len(X))
+        out[p_long == 1] = 1
+        out[p_short == -1] = -1
+        out[(p_long == 1) & (p_short == -1)] = 0
+        return out
 
 def force_scalar_numeric(df):
     """Deep cleaning to extract scalars from boxed numpy arrays and convert to float."""
@@ -97,7 +128,7 @@ def predictive_ui():
             ui.input_action_button("btn_run_analysis", "Run Analysis", class_="btn-primary w-100 mt-3"),
             ui.input_select(
                 "trade_direction", "Direction", 
-                choices=["Both Sides", "Long Only", "Short Only"], 
+                choices=["Both Sides", "Long Only", "Short Only", "Long/Short Combine"], 
                 selected="Both Sides"
             ),
             ui.output_ui("symbol_selection_ui"),
@@ -869,6 +900,7 @@ def predictive_server(input, output, session):
                                     y_series = y_series.where(y_series > 0, 0)
                                 elif direction == "Short Only":
                                     y_series = y_series.where(y_series < 0, 0)
+                                # For "Long/Short Combine" and "Both Sides", we keep the original [-1, 0, 1]
 
                             temp_df = pd.DataFrame(feats_data)
                             temp_df['Target_Y'] = y_series
@@ -960,18 +992,49 @@ def predictive_server(input, output, session):
                 logger.log("Predictive", "INFO", f"Step 3: Training Primary model ({reg_type})")
                 step += 1
                 p.set(step, message=f"Training Primary model ({reg_type})...")
-                model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
-                model.fit(X_train_primary, y_train_primary)
+                direction_ui = input.trade_direction()
                 
-                if is_classification:
-                    primary_calibrators = {}
-                    p_train_proba = model.predict_proba(X_train_primary)
-                    class_to_index = {c: i for i, c in enumerate(model.classes_)}
-                    for c in model.classes_:
-                        ci = class_to_index[c]
-                        y_c = (y_train_primary == c).astype(int)
-                        primary_calibrators[c] = IsotonicCalibrator().fit(p_train_proba[:, ci], y_c)
-                    model = CalibratedModelWrapper(model, primary_calibrators, class_to_index)
+                if direction_ui == "Long/Short Combine":
+                    # TRAIN LONG
+                    y_train_long = y_train_primary.where(y_train_primary > 0, 0)
+                    model_long = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                    model_long.fit(X_train_primary, y_train_long)
+                    if is_classification:
+                        long_cal = {}
+                        p_tr_l = model_long.predict_proba(X_train_primary)
+                        c2i_l = {c: i for i, c in enumerate(model_long.classes_)}
+                        for c in model_long.classes_:
+                            y_c = (y_train_long == c).astype(int)
+                            long_cal[c] = IsotonicCalibrator().fit(p_tr_l[:, c2i_l[c]], y_c)
+                        model_long = CalibratedModelWrapper(model_long, long_cal, c2i_l)
+                        
+                    # TRAIN SHORT
+                    y_train_short = y_train_primary.where(y_train_primary < 0, 0)
+                    model_short = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                    model_short.fit(X_train_primary, y_train_short)
+                    if is_classification:
+                        short_cal = {}
+                        p_tr_s = model_short.predict_proba(X_train_primary)
+                        c2i_s = {c: i for i, c in enumerate(model_short.classes_)}
+                        for c in model_short.classes_:
+                            y_c = (y_train_short == c).astype(int)
+                            short_cal[c] = IsotonicCalibrator().fit(p_tr_s[:, c2i_s[c]], y_c)
+                        model_short = CalibratedModelWrapper(model_short, short_cal, c2i_s)
+                        
+                    model = CombinedLongShortModelWrapper(model_long, model_short)
+                else:
+                    model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                    model.fit(X_train_primary, y_train_primary)
+                    
+                    if is_classification:
+                        primary_calibrators = {}
+                        p_train_proba = model.predict_proba(X_train_primary)
+                        class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                        for c in model.classes_:
+                            ci = class_to_index[c]
+                            y_c = (y_train_primary == c).astype(int)
+                            primary_calibrators[c] = IsotonicCalibrator().fit(p_train_proba[:, ci], y_c)
+                        model = CalibratedModelWrapper(model, primary_calibrators, class_to_index)
                 
                 logger.log("Predictive", "INFO", "Primary model training & calibration complete")
 
@@ -983,56 +1046,80 @@ def predictive_server(input, output, session):
                     step += 1
                     p.set(step, message="Training Meta-model & Backtest...")
 
-                    # Get Primary predictions on the Meta fold
-                    p_meta_input = model.predict(X_train_meta)                        
-                    p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
-
-                    # Get class probabilities
-                    p_meta_proba = model.predict_proba(X_train_meta)  # shape = (n_samples, n_classes)
-                    # Map predicted class to probability
-                    class_to_index = {c: i for i, c in enumerate(model.classes_)}
-                    pred_index = np.array([class_to_index[c] for c in p_meta_input])
-                    pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
-                    
-                    # Keep signal only if probability > 0.5, else 0 (no trade)
-                    p_meta_signals = pd.Series([
-                        sig if conf > 0.5 else 0
-                        for sig, conf in zip(p_meta_input, pred_conf)
-                    ], index=X_train_meta.index)
-                                    
                     direction = input.trade_direction()
-                    if direction == "Long Only":
-                        p_meta_signals = p_meta_signals.where(p_meta_signals > 0, 0)
-                    elif direction == "Short Only":
-                        p_meta_signals = p_meta_signals.where(p_meta_signals < 0, 0)
+                    
+                    if direction == "Long/Short Combine":
+                        def train_meta(model_sub, y_train_meta_sub, direction_sub):
+                            p_meta_input = model_sub.predict(X_train_meta)
+                            p_meta_proba = model_sub.predict_proba(X_train_meta)
+                            c2i = {c: i for i, c in enumerate(model_sub.classes_)}
+                            pred_index = np.array([c2i[c] for c in p_meta_input])
+                            pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
+                            
+                            p_meta_signals = pd.Series([sig if conf > 0.5 else 0 for sig, conf in zip(p_meta_input, pred_conf)], index=X_train_meta.index)
+                            
+                            if direction_sub == "Long Only": p_meta_signals = p_meta_signals.where(p_meta_signals > 0, 0)
+                            if direction_sub == "Short Only": p_meta_signals = p_meta_signals.where(p_meta_signals < 0, 0)
 
-                    if len(tickers) == 1:
-                        ticker = tickers[0]
-                        full_df = manager.load_data(ticker, interval)
-                        if 'open_time' in full_df.columns:
-                            full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
+                            y_meta = (p_meta_signals == y_train_meta_sub).astype(int)
+                            meta_features = pd.concat([X_train_meta, pd.Series(p_meta_signals, index=X_train_meta.index, name='primary_pred')], axis=1)
+                            
+                            m_model = LogisticRegression(max_iter=10000, class_weight='balanced')
+                            m_model.fit(meta_features, y_meta)
+                            
+                            m_cal = {}
+                            m_tr_pb = m_model.predict_proba(meta_features)
+                            m_c2i = {c: i for i, c in enumerate(m_model.classes_)}
+                            for c in m_model.classes_:
+                                m_cal[c] = IsotonicCalibrator().fit(m_tr_pb[:, m_c2i[c]], (y_meta == c).astype(int))
+                            m_model = CalibratedModelWrapper(m_model, m_cal, m_c2i)
+                            
+                            return m_model, p_meta_signals
+                            
+                        meta_model_long, p_meta_sig_l = train_meta(model.model_long, y_train_meta.where(y_train_meta > 0, 0), "Long Only")
+                        meta_model_short, p_meta_sig_s = train_meta(model.model_short, y_train_meta.where(y_train_meta < 0, 0), "Short Only")
                         
-                        # Align df to meta-fold
-                        meta_df = full_df.reindex(X_train_meta.index)
+                        meta_model = CombinedLongShortModelWrapper(meta_model_long, meta_model_short)
+                        p_meta_signals = p_meta_sig_l + p_meta_sig_s
                         y_meta = (p_meta_signals == y_train_meta).astype(int)
                     else:
+                        # Get Primary predictions on the Meta fold
+                        p_meta_input = model.predict(X_train_meta)                        
+                        p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
+
+                        # Get class probabilities
+                        p_meta_proba = model.predict_proba(X_train_meta)  # shape = (n_samples, n_classes)
+                        # Map predicted class to probability
+                        class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                        pred_index = np.array([class_to_index[c] for c in p_meta_input])
+                        pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
+                        
+                        # Keep signal only if probability > 0.5, else 0 (no trade)
+                        p_meta_signals = pd.Series([
+                            sig if conf > 0.5 else 0
+                            for sig, conf in zip(p_meta_input, pred_conf)
+                        ], index=X_train_meta.index)
+                                        
+                        if direction == "Long Only":
+                            p_meta_signals = p_meta_signals.where(p_meta_signals > 0, 0)
+                        elif direction == "Short Only":
+                            p_meta_signals = p_meta_signals.where(p_meta_signals < 0, 0)
+
                         y_meta = (p_meta_signals == y_train_meta).astype(int)
 
-                    # Meta features = original features + primary prediction
-                    meta_features = pd.concat([X_train_meta, pd.Series(p_meta_signals, index=X_train_meta.index, name='primary_pred')], axis=1)
-                    meta_model = LogisticRegression(max_iter=10000, class_weight='balanced')
-                    # meta_model = SVC(C=1.0, kernel='rbf', probability=True, class_weight='balanced', max_iter=10000)
-                    # meta_model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
-                    meta_model.fit(meta_features, y_meta)
-                    
-                    m_calibrators = {}
-                    m_train_proba = meta_model.predict_proba(meta_features)
-                    m_class_to_index = {c: i for i, c in enumerate(meta_model.classes_)}
-                    for c in meta_model.classes_:
-                        ci = m_class_to_index[c]
-                        y_c = (y_meta == c).astype(int)
-                        m_calibrators[c] = IsotonicCalibrator().fit(m_train_proba[:, ci], y_c)
-                    meta_model = CalibratedModelWrapper(meta_model, m_calibrators, m_class_to_index)
+                        # Meta features = original features + primary prediction
+                        meta_features = pd.concat([X_train_meta, pd.Series(p_meta_signals, index=X_train_meta.index, name='primary_pred')], axis=1)
+                        meta_model = LogisticRegression(max_iter=10000, class_weight='balanced')
+                        meta_model.fit(meta_features, y_meta)
+                        
+                        m_calibrators = {}
+                        m_train_proba = meta_model.predict_proba(meta_features)
+                        m_class_to_index = {c: i for i, c in enumerate(meta_model.classes_)}
+                        for c in meta_model.classes_:
+                            ci = m_class_to_index[c]
+                            y_c = (y_meta == c).astype(int)
+                            m_calibrators[c] = IsotonicCalibrator().fit(m_train_proba[:, ci], y_c)
+                        meta_model = CalibratedModelWrapper(meta_model, m_calibrators, m_class_to_index)
                     
                     logger.log("Predictive", "INFO", "Meta-model training & calibration complete")
                     
@@ -1050,64 +1137,116 @@ def predictive_server(input, output, session):
                         returns_all = np.log(full_df['close'] / full_df['close'].shift(1))
                         vol_test = returns_all.rolling(window=input.vol_window()).std().reindex(X_test.index).fillna(0.005)
                         
-                        # RAW signals backtest
-                        p_test_input = model.predict(X_test)
-                        p_test_signals = pd.Series(p_test_input, index=X_test.index)
-                        p_test_proba = model.predict_proba(X_test)  # shape = (n_samples, n_classes)
-                        pred_index = np.array([class_to_index[c] for c in p_test_input])
-                        pred_conf = p_test_proba[np.arange(len(pred_index)), pred_index]
-                        
-                        # Keep signal only if probability > 0.5, else 0 (no trade)
-                        p_test_signals = pd.Series([
-                            sig if conf > 0.5 else 0
-                            for sig, conf in zip(p_test_input, pred_conf)
-                        ], index=X_test.index)
-                        
-                        direction = input.trade_direction()
-                        if direction == "Long Only":
-                            p_test_signals = p_test_signals.where(p_test_signals > 0, 0)
-                        elif direction == "Short Only":
-                            p_test_signals = p_test_signals.where(p_test_signals < 0, 0)
+                        if direction == "Long/Short Combine":
+                            def run_test(model_sub, m_model_sub, direction_sub):
+                                p_t_in = model_sub.predict(X_test)
+                                p_t_pb = model_sub.predict_proba(X_test)
+                                c2i_sub = {c: i for i, c in enumerate(model_sub.classes_)}
+                                p_idx = np.array([c2i_sub[c] for c in p_t_in])
+                                p_cnf = p_t_pb[np.arange(len(p_idx)), p_idx]
+                                
+                                p_test_sig = pd.Series([s if c > 0.5 else 0 for s, c in zip(p_t_in, p_cnf)], index=X_test.index)
+                                if direction_sub == "Long Only": p_test_sig = p_test_sig.where(p_test_sig > 0, 0)
+                                if direction_sub == "Short Only": p_test_sig = p_test_sig.where(p_test_sig < 0, 0)
+                                
+                                bt_engine = BacktestEngine(
+                                    tp_multiplier=input.tp_mult_bt(), sl_multiplier=input.sl_mult_bt(),
+                                    min_holding_bar=input.min_holding_bt(), max_holding_bar=input.max_holding_bt(),
+                                    max_positions=input.max_positions()
+                                )
+                                _, r_m, r_eq, _, r_sig, r_sz = bt_engine.run(test_df_ohlcv, p_test_sig, vol_test, pd.Series(1.0, index=X_test.index))
+                                
+                                m_feat = pd.concat([X_test, pd.Series(p_t_in, index=X_test.index, name='primary_pred')], axis=1)
+                                m_probs = m_model_sub.predict_proba(m_feat)
+                                m_preds = m_model_sub.predict(m_feat)
+                                idx_1 = np.where(m_model_sub.classes_ == 1)[0]
+                                m_probs_1 = m_probs[:, idx_1[0]] if len(idx_1) > 0 else np.zeros(len(X_test))
+                                m_sizing = meta_sizing_cal(m_probs_1)
+                                
+                                _, m_m, m_eq, b_h, m_sig, m_sz = bt_engine.run(test_df_ohlcv, p_test_sig, vol_test, pd.Series(m_sizing, index=X_test.index))
+                                
+                                return p_test_sig, m_probs_1, m_preds, r_m, r_eq, r_sig, r_sz, m_m, m_eq, b_h, m_sig, m_sz
 
-                        bt_engine = BacktestEngine(
-                            tp_multiplier=input.tp_mult_bt(),
-                            sl_multiplier=input.sl_mult_bt(),
-                            min_holding_bar=input.min_holding_bt(),
-                            max_holding_bar=input.max_holding_bt(),
-                            max_positions=input.max_positions()
-                        )
-                        _, raw_metrics, raw_equity, _, raw_sig, raw_size = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(1.0, index=X_test.index))
-                        
-                        # META signals backtest
-                        meta_test_features = pd.concat([X_test, pd.Series(p_test_input, index=X_test.index, name='primary_pred')], axis=1)
-                        meta_probs = meta_model.predict_proba(meta_test_features)
-                        meta_preds = meta_model.predict(meta_test_features)
-                        
-                        y_meta_test = (p_test_signals == y_test).astype(int)
+                            p_t_sig_l, m_probs_l, m_preds_l, r_m_l, r_eq_l, r_sig_l, r_sz_l, m_m_l, m_eq_l, b_h_l, m_sig_l, m_sz_l = run_test(model.model_long, meta_model.model_long, "Long Only")
+                            p_t_sig_s, m_probs_s, m_preds_s, r_m_s, r_eq_s, r_sig_s, r_sz_s, m_m_s, m_eq_s, b_h_s, m_sig_s, m_sz_s = run_test(model.model_short, meta_model.model_short, "Short Only")
+                            
+                            p_test_signals = p_t_sig_l + p_t_sig_s
+                            y_meta_test = (p_test_signals == y_test).astype(int)
+                            
+                            raw_metrics = {k: (r_m_l.get(k, 0) + r_m_s.get(k, 0)) / 2 for k in set(r_m_l) | set(r_m_s)}
+                            metrics = {k: (m_m_l.get(k, 0) + m_m_s.get(k, 0)) / 2 for k in set(m_m_l) | set(m_m_s)}
+                            
+                            meta_results = {
+                                'raw_metrics': raw_metrics, 'raw_equity': (r_eq_l + r_eq_s) / 2, 'raw_sig': r_sig_l + r_sig_s, 'raw_size': r_sz_l + r_sz_s,
+                                'meta_metrics': metrics, 'meta_equity': (m_eq_l + m_eq_s) / 2, 'meta_sig': m_sig_l + m_sig_s, 'meta_size': m_sz_l + m_sz_s,
+                                'buy_hold_equity': b_h_l,
+                                'meta_probs_long': pd.Series(m_probs_l, index=X_test.index),
+                                'meta_probs_short': pd.Series(m_probs_s, index=X_test.index),
+                                'meta_probs': pd.Series(np.maximum(m_probs_l, m_probs_s), index=X_test.index),
+                                'y_meta_test': pd.Series(y_meta_test, index=X_test.index),
+                                'meta_preds': pd.Series(np.where((m_probs_l > 0.5) | (m_probs_s > 0.5), 1, 0), index=X_test.index)
+                            }
 
-                        idx_1 = np.where(meta_model.classes_ == 1)[0]
-                        if len(idx_1) > 0:
-                            meta_probs = meta_probs[:, idx_1[0]]
-                            meta_sizing = meta_sizing_cal(meta_probs) 
                         else:
-                            meta_sizing = np.zeros(len(X_test))
+                            # RAW signals backtest
+                            p_test_input = model.predict(X_test)
+                            p_test_signals = pd.Series(p_test_input, index=X_test.index)
+                            p_test_proba = model.predict_proba(X_test)  # shape = (n_samples, n_classes)
+                            
+                            class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                            pred_index = np.array([class_to_index[c] for c in p_test_input])
+                            pred_conf = p_test_proba[np.arange(len(pred_index)), pred_index]
+                            
+                            # Keep signal only if probability > 0.5, else 0 (no trade)
+                            p_test_signals = pd.Series([
+                                sig if conf > 0.5 else 0
+                                for sig, conf in zip(p_test_input, pred_conf)
+                            ], index=X_test.index)
+                            
+                            if direction == "Long Only":
+                                p_test_signals = p_test_signals.where(p_test_signals > 0, 0)
+                            elif direction == "Short Only":
+                                p_test_signals = p_test_signals.where(p_test_signals < 0, 0)
 
-                        trade_results, metrics, equity_curve, buy_hold_equity, sig_hist, size_hist = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(meta_sizing, index=X_test.index))
-                        
-                        meta_results = {
-                            'raw_metrics': raw_metrics,
-                            'raw_equity': raw_equity,
-                            'raw_sig': raw_sig,
-                            'raw_size': raw_size,
-                            'meta_metrics': metrics,
-                            'meta_equity': equity_curve,
-                            'meta_sig': sig_hist,
-                            'meta_size': size_hist,
-                            'buy_hold_equity': buy_hold_equity,
-                            'meta_probs': pd.Series(meta_probs, index=X_test.index),
-                            'y_meta_test': pd.Series(y_meta_test, index=X_test.index) if isinstance(y_meta_test, np.ndarray) else y_meta_test,
-                            'meta_preds': pd.Series(meta_preds, index=X_test.index)
-                        }
+                            bt_engine = BacktestEngine(
+                                tp_multiplier=input.tp_mult_bt(),
+                                sl_multiplier=input.sl_mult_bt(),
+                                min_holding_bar=input.min_holding_bt(),
+                                max_holding_bar=input.max_holding_bt(),
+                                max_positions=input.max_positions()
+                            )
+                            _, raw_metrics, raw_equity, _, raw_sig, raw_size = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(1.0, index=X_test.index))
+                            
+                            # META signals backtest
+                            meta_test_features = pd.concat([X_test, pd.Series(p_test_input, index=X_test.index, name='primary_pred')], axis=1)
+                            meta_probs = meta_model.predict_proba(meta_test_features)
+                            meta_preds = meta_model.predict(meta_test_features)
+                            
+                            y_meta_test = (p_test_signals == y_test).astype(int)
+
+                            idx_1 = np.where(meta_model.classes_ == 1)[0]
+                            if len(idx_1) > 0:
+                                meta_probs = meta_probs[:, idx_1[0]]
+                                meta_sizing = meta_sizing_cal(meta_probs) 
+                            else:
+                                meta_sizing = np.zeros(len(X_test))
+
+                            trade_results, metrics, equity_curve, buy_hold_equity, sig_hist, size_hist = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(meta_sizing, index=X_test.index))
+                            
+                            meta_results = {
+                                'raw_metrics': raw_metrics,
+                                'raw_equity': raw_equity,
+                                'raw_sig': raw_sig,
+                                'raw_size': raw_size,
+                                'meta_metrics': metrics,
+                                'meta_equity': equity_curve,
+                                'meta_sig': sig_hist,
+                                'meta_size': size_hist,
+                                'buy_hold_equity': buy_hold_equity,
+                                'meta_probs': pd.Series(meta_probs, index=X_test.index),
+                                'y_meta_test': pd.Series(y_meta_test, index=X_test.index) if isinstance(y_meta_test, np.ndarray) else y_meta_test,
+                                'meta_preds': pd.Series(meta_preds, index=X_test.index)
+                            }
                     else:
                         # Multi-ticker: Simple "Naive Portfolio" Backtest
                         # Average returns per timestamp across symbols
@@ -1177,8 +1316,11 @@ def predictive_server(input, output, session):
                     logger.log("Predictive", "INFO", "Step 4.2: Calculating SHAP values")
                     step += 1
                     p.set(step, message="Calculating SHAP values...")
+                    
+                    direction = input.trade_direction()
+                    
                     # Primary Model SHAP
-                    if model is not None:
+                    if model is not None and direction != "Long/Short Combine":
                         # Use a sample of test data for SHAP to keep it fast
                         X_shap_primary = X_test.iloc[-300:] if len(X_test) > 300 else X_test
                         # Extra safety: aggressively unbox/flatten for SHAP
@@ -1200,7 +1342,7 @@ def predictive_server(input, output, session):
                             logger.log("Predictive", "WARNING", f"Primary SHAP failed: {e}")
                     
                     # Meta Model SHAP
-                    if meta_model is not None:
+                    if meta_model is not None and direction != "Long/Short Combine":
                         X_shap_meta = meta_test_features.iloc[-300:] if len(meta_test_features) > 300 else meta_test_features
                         # Extra safety: aggressively unbox/flatten for SHAP
                         X_shap_meta = force_scalar_numeric(X_shap_meta)
@@ -1694,64 +1836,89 @@ def predictive_server(input, output, session):
             meta_size = meta_results['meta_size']
             buy_hold_equity = meta_results['buy_hold_equity']
             meta_probs = meta_results.get('meta_probs', pd.Series(0.5, index=raw_equity.index))
+        meta_probs_long = meta_results.get('meta_probs_long', None)
+        meta_probs_short = meta_results.get('meta_probs_short', None)
+        
+        # Align indices 
+        plot_df_dict = {
+            'Raw Equity': raw_equity,
+            'Meta Equity': meta_equity,
+            'BnH Equity': buy_hold_equity,
+            'Raw Size': raw_size,
+            'Meta Size': meta_size,
+            'Meta Probs': meta_probs
+        }
+        if meta_probs_long is not None:
+            plot_df_dict['Meta Probs Long'] = meta_probs_long
+            plot_df_dict['Meta Probs Short'] = meta_probs_short
             
-            # Align indices 
-            plot_df = pd.DataFrame({
-                'Raw Equity': raw_equity,
-                'Meta Equity': meta_equity,
-                'BnH Equity': buy_hold_equity,
-                'Raw Size': raw_size,
-                'Meta Size': meta_size,
-                'Meta Probs': meta_probs
-            }).fillna(method='ffill')
-            
-            # Ensure index is datetime for proper Plotly handling
-            if not isinstance(plot_df.index, pd.DatetimeIndex):
-                plot_df.index = pd.to_datetime(plot_df.index)
+        plot_df = pd.DataFrame(plot_df_dict).fillna(method='ffill')
+        
+        # Ensure index is datetime for proper Plotly handling
+        if not isinstance(plot_df.index, pd.DatetimeIndex):
+            plot_df.index = pd.to_datetime(plot_df.index)
 
-            plot_df.index = plot_df.index.strftime('%Y-%m-%d %H:%M')
+        plot_df.index = plot_df.index.strftime('%Y-%m-%d %H:%M')
 
-            fig = make_subplots(
-                rows=3, cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.04,
-                row_heights=[0.5, 0.25, 0.25],
-                specs=[[{"secondary_y": False}], [{}], [{}]]
-            )
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=[0.5, 0.25, 0.25],
+            specs=[[{"secondary_y": False}], [{}], [{}]]
+        )
 
-            # Row 1: Equity Curves
+        # Row 1: Equity Curves
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df['Raw Equity'] / plot_df['Raw Equity'].iloc[0] - 1,
+            name="Raw Signal PnL",
+            line=dict(color="#9AA0A6", width=2)
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df['Meta Equity'] / plot_df['Meta Equity'].iloc[0] - 1,
+            name="Meta Optimized PnL",
+            line=dict(color="#00E5A8", width=3)
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df['BnH Equity'] / plot_df['BnH Equity'].iloc[0] - 1,
+            name="Buy & Hold PnL",
+            line=dict(color="#FFD700", width=1.5, dash='dot')
+        ), row=1, col=1)
+
+        # Dummy trace for 0.5 fill
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=np.full(len(plot_df), 0.5),
+            mode='lines',
+            line=dict(color='rgba(0,0,0,0)', width=0),
+            showlegend=False,
+            hoverinfo='skip'
+        ), row=2, col=1)
+
+        # Row 2: Meta Probabilities
+        if 'Meta Probs Long' in plot_df.columns:
             fig.add_trace(go.Scatter(
                 x=plot_df.index,
-                y=plot_df['Raw Equity'] / plot_df['Raw Equity'].iloc[0] - 1,
-                name="Raw Signal PnL",
-                line=dict(color="#9AA0A6", width=2)
-            ), row=1, col=1)
-
-            fig.add_trace(go.Scatter(
-                x=plot_df.index,
-                y=plot_df['Meta Equity'] / plot_df['Meta Equity'].iloc[0] - 1,
-                name="Meta Optimized PnL",
-                line=dict(color="#00E5A8", width=3)
-            ), row=1, col=1)
-
-            fig.add_trace(go.Scatter(
-                x=plot_df.index,
-                y=plot_df['BnH Equity'] / plot_df['BnH Equity'].iloc[0] - 1,
-                name="Buy & Hold PnL",
-                line=dict(color="#FFD700", width=1.5, dash='dot')
-            ), row=1, col=1)
-
-            # Dummy trace for 0.5 fill
-            fig.add_trace(go.Scatter(
-                x=plot_df.index,
-                y=np.full(len(plot_df), 0.5),
-                mode='lines',
-                line=dict(color='rgba(0,0,0,0)', width=0),
-                showlegend=False,
-                hoverinfo='skip'
+                y=plot_df['Meta Probs Long'],
+                name="Long Prob",
+                line=dict(color="#00E5A8", width=1.5),
+                fill='tozeroy',
+                fillcolor='rgba(0, 229, 168, 0.1)'
             ), row=2, col=1)
-
-            # Row 2: Meta Probabilities
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Meta Probs Short'],
+                name="Short Prob",
+                line=dict(color="#f72585", width=1.5),
+                fill='tozeroy',
+                fillcolor='rgba(247, 37, 133, 0.1)'
+            ), row=2, col=1)
+        else:
             fig.add_trace(go.Scatter(
                 x=plot_df.index,
                 y=plot_df['Meta Probs'],
@@ -1760,48 +1927,48 @@ def predictive_server(input, output, session):
                 fill='tonexty',
                 fillcolor='rgba(247, 37, 133, 0.1)'
             ), row=2, col=1)
-            
-            # Add 0.5 threshold line
-            fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(255,255,255,0.5)", row=2, col=1)
+        
+        # Add 0.5 threshold line
+        fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(255,255,255,0.5)", row=2, col=1)
 
-            # Row 3: Signals and Sizes from Backtest
-            fig.add_trace(go.Scatter(
-                x=plot_df.index,
-                y=plot_df['Raw Size'],
-                name="Raw Size",
-                line=dict(color="#9AA0A6", width=1.5),
-                opacity=0.5
-            ), row=3, col=1)
+        # Row 3: Signals and Sizes from Backtest
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df['Raw Size'],
+            name="Raw Size",
+            line=dict(color="#9AA0A6", width=1.5),
+            opacity=0.5
+        ), row=3, col=1)
 
-            fig.add_trace(go.Scatter(
-                x=plot_df.index,
-                y=plot_df['Meta Size'],
-                name="Meta Size",
-                line=dict(color="#4cc9f0", width=2)
-            ), row=3, col=1)
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df['Meta Size'],
+            name="Meta Size",
+            line=dict(color="#4cc9f0", width=2)
+        ), row=3, col=1)
 
-            # Layout update
-            fig.update_layout(
-                height=700,
-                width=1470,
-                template="plotly_dark",
-                margin=dict(t=40, b=60, l=40, r=30),
-                paper_bgcolor="#0b3d91",
-                plot_bgcolor="#0b3d91",
-                font=dict(family="Space Mono", color="white"),
-                legend=dict(orientation="h", yanchor="top", y=-0.1, xanchor="center", x=0.5)
-            )
+        # Layout update
+        fig.update_layout(
+            height=700,
+            width=1470,
+            template="plotly_dark",
+            margin=dict(t=40, b=60, l=40, r=30),
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
+            legend=dict(orientation="h", yanchor="top", y=-0.1, xanchor="center", x=0.5)
+        )
 
-            # Update Y axes
-            fig.update_yaxes(title_text="Return", row=1, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
-            fig.update_yaxes(title_text="Meta Prob", row=2, col=1, range=[0, 1], gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
-            fig.update_yaxes(title_text="Signal/Size", row=3, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
+        # Update Y axes
+        fig.update_yaxes(title_text="Return", row=1, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
+        fig.update_yaxes(title_text="Meta Prob", row=2, col=1, range=[0, 1], gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
+        fig.update_yaxes(title_text="Signal/Size", row=3, col=1, gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)")
 
-            # Update X axes
-            for i in range(1, 4):
-                fig.update_xaxes(gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)", row=i, col=1)
+        # Update X axes
+        for i in range(1, 4):
+            fig.update_xaxes(gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.1)", row=i, col=1)
 
-            return fig
+        return fig
 
     @render_widget
     def predicted_label_chart():

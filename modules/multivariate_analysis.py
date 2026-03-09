@@ -49,6 +49,15 @@ def multivariate_analysis_ui():
                     ),
 
                     ui.panel_conditional(
+                        "input.dependence_structure === 'Correlation'",
+                        ui.input_select(
+                            "corr_method",
+                            "Correlation Method",
+                            choices=["pearson", "spearman", "kendall"]
+                        ),
+                    ),
+
+                    ui.panel_conditional(
                         "input.dependence_structure === 'Arbitrage'",
                         ui.input_select(
                             "arb_method",
@@ -64,11 +73,11 @@ def multivariate_analysis_ui():
                     ),
 
                     ui.panel_conditional(
-                        "input.dependence_structure === 'Correlation'",
-                        ui.input_select(
-                            "corr_method",
-                            "Method",
-                            choices=["pearson", "kendall", "spearman"]
+                        "input.arb_method === 'arbitrage_score'",
+                        ui.input_checkbox(
+                            "mean_reversion",
+                            "Mean Reversion",
+                            value=True
                         ),
                     ),
 
@@ -446,7 +455,8 @@ def multivariate_analysis_server(input, output, session):
                     if not price: return
                     raw_matrix = MatrixEngine.calculate_arbitrage_score_matrix(
                         price,
-                        window_size=input.window_size()
+                        window_size=input.window_size(),
+                        mean_reversion=input.mean_reversion()
                     )
                 else:
                     return
@@ -583,10 +593,10 @@ def multivariate_analysis_server(input, output, session):
                     xref="paper",
                     yref="y",
                     x0=0,
-                    y0=row_idx - 0.55,
+                    y0=row_idx - 0.2,
                     x1=1,
-                    y1=row_idx + 0.55,
-                    line=dict(color="#000000", width=2.5),
+                    y1=row_idx + 0.2,
+                    line=dict(color="#000000", width=10),
                     fillcolor="rgba(0,0,0,0)",
                     layer="above"
                 ))
@@ -596,10 +606,10 @@ def multivariate_analysis_server(input, output, session):
                     xref="paper",
                     yref="y",
                     x0=0,
-                    y0=row_idx - 0.5,
+                    y0=row_idx - 0.2,
                     x1=1,
-                    y1=row_idx + 0.5,
-                    line=dict(color="#FFFFFF", width=2),
+                    y1=row_idx + 0.2,
+                    line=dict(color="#FFFFFF", width=3),
                     fillcolor="rgba(0,0,0,0)",
                     layer="above"
                 ))
@@ -1036,6 +1046,31 @@ def multivariate_analysis_server(input, output, session):
 
             fig = go.Figure()
 
+            # --- Pre-calculate node sizes for arrow standoffs ---
+            spillover = d.get('spillover', {})
+            in_spill = d.get('in_spillover', {})
+            out_spill = d.get('out_spillover', {})
+            colors = [spillover.get(l, 0) for l in labels]
+            
+            # Scale node size based on net influence magnitude
+            spill_vals = np.array(list(spillover.values()))
+            if len(spill_vals) > 0:
+                abs_spill = np.abs(spill_vals)
+                s_min, s_max = abs_spill.min(), abs_spill.max()
+                s_range = s_max - s_min if s_max > s_min else 1.0
+                raw_sizes = np.array([10 + 10 ** (1 + spillover.get(l, 0)) for l in labels])
+
+                # Min-max normalize to [0,1]
+                s_min, s_max = raw_sizes.min(), raw_sizes.max()
+                s_range = s_max - s_min if s_max > s_min else 1.0
+                node_sizes = (raw_sizes - s_min) / s_range
+                node_sizes = node_sizes * 20 + 10
+            else:
+                node_sizes = [10] * len(labels)
+                
+            node_size_dict = {l: s for l, s in zip(labels, node_sizes)}
+            # ----------------------------------------------------
+
             # Draw edges
             if edges:
                 max_w = max(e['weight'] for e in edges)
@@ -1046,8 +1081,9 @@ def multivariate_analysis_server(input, output, session):
 
             annotations = []
             for edge in edges:
-                x0, y0 = pos[edge['source']]
-                x1, y1 = pos[edge['target']]
+                source, target = edge['source'], edge['target']
+                x0, y0 = pos[source]
+                x1, y1 = pos[target]
                 
                 # Scale width between 1.0 and 2.0
                 norm_w = (edge['weight'] - min_w) / range_w
@@ -1061,9 +1097,17 @@ def multivariate_analysis_server(input, output, session):
                     showlegend=False
                 ))
 
+                # Dynamically set standoff using node radius
+                # node_size is diameter in pixels, so radius is size / 2.
+                # Add a bit of padding (e.g. +2)
+                src_radius = node_size_dict[source] / 2 + 2
+                tgt_radius = node_size_dict[target] / 2 + 2
+
                 # Add directional arrow via annotation
                 # We offset slightly so the arrowhead isn't buried in the node
                 # The arrow points from source to target (directed spillover)
+                # Note: annotations don't inherently support 'layer' in older Plotly versions,
+                # but if supported, it forces them behind traces. Otherwise they sit above.
                 annotations.append(dict(
                     ax=x0, ay=y0, axref='x', ayref='y',
                     x=x1, y=y1, xref='x', yref='y',
@@ -1072,37 +1116,13 @@ def multivariate_analysis_server(input, output, session):
                     arrowsize=1.5,
                     arrowwidth=width,
                     arrowcolor="rgba(255,165,0,0.8)",
-                    standoff=15, # offset from the target node center
-                    startstandoff=10 # offset from source node
+                    standoff=tgt_radius, 
+                    startstandoff=src_radius
                 ))
 
             # Draw nodes
             node_x = [pos[l][0] for l in labels]
             node_y = [pos[l][1] for l in labels]
-
-            # Color and size by spillover influence
-            spillover = d.get('spillover', {})
-            in_spill = d.get('in_spillover', {})
-            out_spill = d.get('out_spillover', {})
-            colors = [spillover.get(l, 0) for l in labels]
-            
-            # Scale node size based on net influence magnitude
-            spill_vals = np.array(list(spillover.values()))
-            if len(spill_vals) > 0:
-                abs_spill = np.abs(spill_vals)
-                s_min, s_max = abs_spill.min(), abs_spill.max()
-                s_range = s_max - s_min if s_max > s_min else 1.0
-                # node_sizes = [10 + 20 * (abs(spillover.get(l, 0)) - s_min) / s_range for l in labels]
-                raw_sizes = np.array([10 + 10 ** (1 + spillover.get(l, 0)) for l in labels])
-
-                # Min-max normalize to [0,1]
-                s_min, s_max = raw_sizes.min(), raw_sizes.max()
-                s_range = s_max - s_min if s_max > s_min else 1.0
-                node_sizes = (raw_sizes - s_min) / s_range
-                node_sizes = node_sizes * 20 + 10
-
-            else:
-                node_sizes = [10] * len(labels)
 
             h_texts = [
                 f"{l}<br>"
@@ -1121,14 +1141,14 @@ def multivariate_analysis_server(input, output, session):
                     line=dict(width=1, color="white"),
                     showscale=True,
                     colorbar=dict(title="Net Spillover")
-                    ),
+                ),
                 text=labels,
                 textposition="top center",
                 textfont=dict(size=10, color="white"),
                 hovertext=h_texts,
                 hoverinfo="text",
                 showlegend=False
-                ))
+            ))
 
             fig.update_layout(
                 xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),

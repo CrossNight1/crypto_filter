@@ -86,7 +86,7 @@ def pair_radar_ui():
                             full_screen=False
                         ),
                         ui.card(
-                            ui.card_header("Real-time Prob"),
+                            ui.card_header("Conditional Probabilities"),
                             ui.output_ui("copula_prob_info")
                         )
                     ),

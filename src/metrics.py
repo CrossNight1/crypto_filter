@@ -602,6 +602,10 @@ class MetricsEngine:
             b_close = pd.to_numeric(b_df['close'], errors='coerce').ffill().fillna(0)
             benchmark_returns = b_close.pct_change().dropna()
             
+        from src.data import BinanceFuturesFetcher
+        import time
+        fetcher = BinanceFuturesFetcher()
+            
         for symbol, df in prices_data.items():
             try:
                 if df.empty: continue
@@ -627,6 +631,14 @@ class MetricsEngine:
                 }
                 # Add all standard metrics to row
                 row.update(latest_adv)
+                
+                # # Fetch orderbook metrics
+                # book_stats = fetcher.get_books_status(symbol)
+                # row['orderbook_imbalance'] = book_stats.get('orderbook_imbalance', np.nan)
+                # row['spread'] = book_stats.get('impact_spread', np.nan)
+                
+                # Small sleep to respect rate limits (orderbook endpoint has weight 50)
+                time.sleep(0.05)
                 
                 # Store in cache
                 self._results_cache[cache_key] = row
@@ -700,8 +712,9 @@ def copula_cond_probs(u_hist, v_hist, u_curr, v_curr, method="gaussian", **kwarg
         if theta <= 0:
             raise ValueError("Clayton copula θ must be > 0")
 
-        p_uv = (u_curr**(-theta) + v_curr**(-theta) - 1)**(-(1+1/theta))
-        p_vu = (v_curr**(-theta) + u_curr**(-theta) - 1)**(-(1+1/theta))
+        base = np.maximum(u_curr**(-theta) + v_curr**(-theta) - 1, 1e-10)
+        p_uv = (v_curr**(-theta - 1)) * (base**(-(1+1/theta)))
+        p_vu = (u_curr**(-theta - 1)) * (base**(-(1+1/theta)))
         return p_uv, p_vu
 
     elif method.lower() == "gumbel":
@@ -709,8 +722,14 @@ def copula_cond_probs(u_hist, v_hist, u_curr, v_curr, method="gaussian", **kwarg
         if theta < 1:
             raise ValueError("Gumbel copula θ must be ≥ 1")
 
-        p_uv = np.exp(- (( (-np.log(u_curr))**theta + (-np.log(v_curr))**theta )**(1/theta) - (-np.log(v_curr))) )
-        p_vu = np.exp(- (( (-np.log(v_curr))**theta + (-np.log(u_curr))**theta )**(1/theta) - (-np.log(u_curr))) )
+        u_tilde = -np.log(u_curr)
+        v_tilde = -np.log(v_curr)
+        sum_t = np.maximum(u_tilde**theta + v_tilde**theta, 1e-10)
+        
+        C = np.exp(-(sum_t**(1/theta)))
+        
+        p_uv = C * (1.0 / v_curr) * (sum_t**(1/theta - 1)) * (v_tilde**(theta - 1))
+        p_vu = C * (1.0 / u_curr) * (sum_t**(1/theta - 1)) * (u_tilde**(theta - 1))
         return p_uv, p_vu
 
     else:

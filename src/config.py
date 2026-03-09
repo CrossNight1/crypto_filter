@@ -78,6 +78,8 @@ METRIC_LABELS = {
     'vol_rank': 'Volatility Rank',
     'max_drawdown': 'Max Drawdown',
     'avg_drawdown': 'Average Drawdown',
+    'orderbook_imbalance': 'OBook Imbalance',
+    'spread': 'Spread',
     'None': 'None'
 }
 
@@ -89,13 +91,13 @@ ALL_METRICS = [
     'rsi_norm', 'atr_norm', 'cmf', 'vwap_z', 'skewness',
     'autocorr_1', 'autocorr_5', 'imbalance_bar', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank',
     'max_drawdown', 'avg_drawdown',
-    'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20',
+    'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20'
 ]
 
 DEFAULT_FEATURES = [
     'fip', 
     'adf_hist', 'ewva', 'aroon_osc', 
-    'atr_norm', 'vol_atr', 'vama', 'cmf', 'price_zscore', 'vam', 'skewness',
+    'atr_norm', 'vol_atr', 'vama', 'cmf', 'vam', 'skewness',
     'sign_lag1', 'sign_lag2', 'sign_lag3',
     'autocorr_1', 'autocorr_5', 
     'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank',

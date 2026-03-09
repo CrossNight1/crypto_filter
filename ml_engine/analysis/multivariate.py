@@ -122,33 +122,52 @@ class MatrixEngine:
 
     @staticmethod
     def calculate_matrix(data_map, method="pearson", window_size=50):
+        # 1. Efficiently merge only the necessary window
+        trimmed = {}
+        for s, v in data_map.items():
+            if len(v) > 0:
+                trimmed[s] = v.iloc[-window_size:]
+        
+        if not trimmed:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(trimmed)
+        
+        # 2. Slice windows
+        wide_long = df # already trimmed to window_size
+        wide_short = df.iloc[-(window_size // 10):] if len(df) >= (window_size // 10) else df
 
-        wide_long = pd.DataFrame(data_map)[window_size:]
-        wide_short = pd.DataFrame(data_map)[window_size // 10:]
+        # 3. Calculate correlations with relaxed min_periods
+        corr_long = wide_long.corr(method=method, min_periods=window_size // 2)
+        corr_short = wide_short.corr(method=method, min_periods=max(2, window_size // 20))
 
-        corr_long = wide_long.corr(method=method, min_periods=window_size)
-        corr_short = wide_short.corr(method=method, min_periods=window_size)
-
-        long_weight = 0.9
-        short_weight = 0.1
-
-        corr_shrink = (long_weight * corr_long) + (short_weight * corr_short)
+        # 4. Robust shrinkage: fallback to long-term for missing short-term pairs
+        # fillna ensures NaNs in short-term don't poison the result
+        corr_shrink = (0.9 * corr_long) + (0.1 * corr_short.fillna(corr_long))
 
         return corr_shrink
 
     @staticmethod
     def calculate_covariance(data_map, window_size=50):
+        # 1. Efficiently merge only the necessary window
+        trimmed = {}
+        for s, v in data_map.items():
+            if len(v) > 0:
+                trimmed[s] = v.iloc[-window_size:]
+        
+        if not trimmed:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(trimmed)
 
-        wide_long = pd.DataFrame(data_map)[window_size:]
-        wide_short = pd.DataFrame(data_map)[window_size // 10:]
+        wide_long = df
+        wide_short = df.iloc[-(window_size // 10):] if len(df) >= (window_size // 10) else df
 
-        cov_long = wide_long.cov(min_periods=window_size)
-        cov_short = wide_short.cov(min_periods=window_size)
+        cov_long = wide_long.cov(min_periods=window_size // 2)
+        cov_short = wide_short.cov(min_periods=max(2, window_size // 20))
 
-        long_weight = 0.9
-        short_weight = 0.1
-
-        cov_shrink = (long_weight * cov_long) + (short_weight * cov_short)
+        # Robust shrinkage
+        cov_shrink = (0.9 * cov_long) + (0.1 * cov_short.fillna(cov_long))
         cov_shrink *= 100
 
         return cov_shrink
@@ -157,8 +176,12 @@ class MatrixEngine:
     def stabilize_matrix(matrix, eps=1e-6):
 
         matrix = matrix.replace([np.inf, -np.inf], np.nan)
-        matrix = matrix.dropna(axis=1, how="any")
-        matrix = matrix.dropna(axis=0, how="any")
+        # Relaxed filtering: only drop if entire row/column is NaN
+        matrix = matrix.dropna(axis=1, how="all")
+        matrix = matrix.dropna(axis=0, how="all")
+        
+        # Then use iterative blank filtering for remaining NaNs
+        matrix, _ = MatrixEngine.filter_blanks(matrix)
 
         # Force symmetry
         matrix = (matrix + matrix.T) / 2
@@ -184,8 +207,8 @@ class MatrixEngine:
     @staticmethod
     def calculate_partial_correlation(data_map, window_size=50):
 
-        wide_df = pd.DataFrame(data_map)[window_size:]
-        cov = wide_df.cov(min_periods=window_size)
+        wide_df = pd.DataFrame(data_map)[-window_size:]
+        cov = wide_df.cov(min_periods=window_size // 2)
 
         cov = MatrixEngine.stabilize_matrix(cov)
 
@@ -203,8 +226,8 @@ class MatrixEngine:
     @staticmethod
     def calculate_precision_matrix(data_map, window_size=50):
 
-        wide_df = pd.DataFrame(data_map)[window_size:]
-        cov = wide_df.cov(min_periods=window_size)
+        wide_df = pd.DataFrame(data_map)[-window_size:]
+        cov = wide_df.cov(min_periods=window_size // 2)
 
         cov = MatrixEngine.stabilize_matrix(cov)
 
@@ -297,9 +320,7 @@ class MatrixEngine:
                     continue
 
                 halflife = -np.log(2) / beta
-                if halflife > 100:
-                    hl_matrix.loc[i, j] = 0
-                    continue
+                halflife = min(halflife, 100)
 
                 hl_matrix.loc[i, j] = halflife
 
@@ -332,7 +353,7 @@ class MatrixEngine:
         return vr_matrix
 
     @staticmethod
-    def calculate_arbitrage_score_matrix(data_map, window_size=50, weights=None):
+    def calculate_arbitrage_score_matrix(data_map, window_size=50, mean_reversion=True):
         """
         Compute an arbitrage score matrix combining correlation, partial correlation,
         cointegration, z-score, and half-life.
@@ -340,13 +361,21 @@ class MatrixEngine:
         Returns:
             pd.DataFrame: matrix of arbitrage scores (0–1 normalized)
         """
-        if weights is None:
+        if mean_reversion:
             weights = {
                 "corr": 0.25,
-                "partial": 0.0,
+                "partial": 0.1,
                 "halflife": 0.2,
                 "coint": 0.25,
-                "zscore": 0.3,
+                "zscore": 0.2,
+            }
+        else:
+            weights = {
+                "corr": 0.3,
+                "partial": 0.1,
+                "halflife": -0.2,
+                "coint": 0.1,
+                "zscore": 0.7,
             }
         
         wide = np.log(pd.DataFrame(data_map)[-window_size:])
