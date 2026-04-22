@@ -16,6 +16,29 @@ class MatrixEngine:
         MatrixEngine._residual_cache = {}
 
     @staticmethod
+    def _prepare_data(df, data_source="price", data_structure="raw"):
+        """
+        Transforms the input DataFrame based on source and structure options.
+        """
+        # 1. Handle data source
+        if data_source == "return":
+            # Calculate log returns if not already returns
+            df = np.log(df.replace(0, np.nan)).diff().dropna(axis=0, how="all")
+        
+        # 2. Handle data structure
+        if data_structure == "ranking":
+            df = df.rank(axis=0, pct=True)
+        elif data_structure == "sign":
+            if data_source == "price":
+                # Sign of the change
+                df = np.sign(df.diff().fillna(0))
+            else:
+                # Sign of the returns
+                df = np.sign(df.fillna(0))
+        
+        return df
+
+    @staticmethod
     def _get_residual(i, j, wide):
 
         key = (i, j)
@@ -121,7 +144,7 @@ class MatrixEngine:
         return coint_matrix.fillna(0)
 
     @staticmethod
-    def calculate_matrix(data_map, method="pearson", window_size=50):
+    def calculate_matrix(data_map, method="pearson", window_size=50, data_source="price", data_structure="raw"):
         # 1. Efficiently merge only the necessary window
         trimmed = {}
         for s, v in data_map.items():
@@ -133,22 +156,27 @@ class MatrixEngine:
             
         df = pd.DataFrame(trimmed)
         
-        # 2. Slice windows
-        wide_long = df # already trimmed to window_size
+        # 2. Prepare data based on source and structure
+        df = MatrixEngine._prepare_data(df, data_source=data_source, data_structure=data_structure)
+        
+        if df.empty:
+            return pd.DataFrame()
+
+        # 3. Slice windows
+        wide_long = df
         wide_short = df.iloc[-(window_size // 10):] if len(df) >= (window_size // 10) else df
 
-        # 3. Calculate correlations with relaxed min_periods
+        # 4. Calculate correlations with relaxed min_periods
         corr_long = wide_long.corr(method=method, min_periods=window_size // 2)
         corr_short = wide_short.corr(method=method, min_periods=max(2, window_size // 20))
 
-        # 4. Robust shrinkage: fallback to long-term for missing short-term pairs
-        # fillna ensures NaNs in short-term don't poison the result
+        # 5. Robust shrinkage: fallback to long-term for missing short-term pairs
         corr_shrink = (0.9 * corr_long) + (0.1 * corr_short.fillna(corr_long))
 
         return corr_shrink
 
     @staticmethod
-    def calculate_covariance(data_map, window_size=50):
+    def calculate_covariance(data_map, window_size=50, data_source="price", data_structure="raw"):
         # 1. Efficiently merge only the necessary window
         trimmed = {}
         for s, v in data_map.items():
@@ -159,6 +187,12 @@ class MatrixEngine:
             return pd.DataFrame()
             
         df = pd.DataFrame(trimmed)
+
+        # 2. Prepare data
+        df = MatrixEngine._prepare_data(df, data_source=data_source, data_structure=data_structure)
+        
+        if df.empty:
+            return pd.DataFrame()
 
         wide_long = df
         wide_short = df.iloc[-(window_size // 10):] if len(df) >= (window_size // 10) else df
@@ -205,9 +239,15 @@ class MatrixEngine:
         return np.zeros_like(matrix)
 
     @staticmethod
-    def calculate_partial_correlation(data_map, window_size=50):
+    def calculate_partial_correlation(data_map, window_size=50, data_source="price", data_structure="raw"):
 
         wide_df = pd.DataFrame(data_map)[-window_size:]
+        # Prepare data
+        wide_df = MatrixEngine._prepare_data(wide_df, data_source=data_source, data_structure=data_structure)
+        
+        if wide_df.empty:
+            return pd.DataFrame()
+
         cov = wide_df.cov(min_periods=window_size // 2)
 
         cov = MatrixEngine.stabilize_matrix(cov)
@@ -224,9 +264,15 @@ class MatrixEngine:
         return pd.DataFrame(partial, index=cov.index, columns=cov.columns)
 
     @staticmethod
-    def calculate_precision_matrix(data_map, window_size=50):
+    def calculate_precision_matrix(data_map, window_size=50, data_source="price", data_structure="raw"):
 
         wide_df = pd.DataFrame(data_map)[-window_size:]
+        # Prepare data
+        wide_df = MatrixEngine._prepare_data(wide_df, data_source=data_source, data_structure=data_structure)
+        
+        if wide_df.empty:
+            return pd.DataFrame()
+
         cov = wide_df.cov(min_periods=window_size // 2)
 
         cov = MatrixEngine.stabilize_matrix(cov)
@@ -363,18 +409,18 @@ class MatrixEngine:
         """
         if mean_reversion:
             weights = {
-                "corr": 0.25,
-                "partial": 0.1,
+                "corr": 0.2,
+                "partial": 0.2,
                 "halflife": 0.2,
-                "coint": 0.25,
+                "coint": 0.2,
                 "zscore": 0.2,
             }
         else:
             weights = {
-                "corr": 0.3,
-                "partial": 0.1,
+                "corr": 0.4,
+                "partial": -0.1,
                 "halflife": -0.2,
-                "coint": 0.1,
+                "coint": 0.2,
                 "zscore": 0.7,
             }
         
@@ -597,7 +643,20 @@ class DecompositionEngine:
     @staticmethod
     def distance_matrix(corr_matrix):
         """D_ij = √(2(1 - ρ_ij))"""
-        dist = np.sqrt(2 * (1 - corr_matrix.values))
+        vals = corr_matrix.values.copy()
+        # Keep only finite values, replace others with 0
+        vals = np.where(np.isfinite(vals), vals, 0)
+        
+        # If values look like they aren't correlation (outside [-1, 1] significantly)
+        # normalize them to the [-1, 1] range to make the distance logic work
+        v_abs_max = np.max(np.abs(vals))
+        if v_abs_max > 1.001:
+            vals = vals / v_abs_max
+            
+        # Ensure values are clipped to [-1, 1] for correlation-based distance formula
+        vals = np.clip(vals, -1.0, 1.0)
+        
+        dist = np.sqrt(np.maximum(2 * (1 - vals), 0))
         np.fill_diagonal(dist, 0)
         return pd.DataFrame(dist, index=corr_matrix.index, columns=corr_matrix.columns)
 

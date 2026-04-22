@@ -32,11 +32,15 @@ class BinanceFuturesFetcher:
         self.rate_limit_delay = rate_limit_delay
 
     def _request(self, endpoint: str, params: dict = None) -> dict:
+        url = f"{self.BASE_URL}{endpoint}"
         try:
-            url = f"{self.BASE_URL}{endpoint}"
             response = self.session.get(url, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            # Propagate HTTP errors so callers can handle 418/429
+            logger.error(f"HTTP Error {response.status_code} for {endpoint}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Request failed {endpoint}: {e}")
             return {}
@@ -138,7 +142,7 @@ class BinanceFuturesFetcher:
         symbols = []
         for s in info['symbols']:
             sym = s['symbol']
-            if sym.endswith('USDT') and s['status'] == 'TRADING':
+            if sym.endswith('USDT') and s['status'] == 'TRADING' and s['contractType'] == 'PERPETUAL':
                 if sym not in IGNORED_CRYPTO:
                     symbols.append(sym)
         return sorted(symbols)
@@ -216,6 +220,13 @@ class BinanceFuturesFetcher:
                     df = self.fetch_klines(symbol, interval, start_time=current_start, end_time=end_ts, limit=limit)
                     if not df.empty:
                         break
+                except requests.exceptions.HTTPError as e:
+                    # If 418 (IP Banned) or 429 (Rate Limit), stop immediately
+                    if e.response.status_code in [418, 429]:
+                        logger.critical(f"Aborting fetch for {symbol} due to Rate Limit/Ban: {e}")
+                        raise
+                    logger.warning(f"Retry {attempt+1}/{max_retries} for {symbol} due to HTTP Error: {e}")
+                    time.sleep(1)
                 except Exception as e:
                     logger.warning(f"Retry {attempt+1}/{max_retries} for {symbol} due to: {e}")
                     time.sleep(1)
@@ -296,6 +307,9 @@ class DataManager:
             self._universe_cache = syms
             self._last_universe_fetch = now
             return syms
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error fetching universe ({e.response.status_code}): {e}")
+            return MANDATORY_CRYPTO
         except Exception as e:
             logger.error(f"Failed to fetch universe: {e}")
             return MANDATORY_CRYPTO # Fallback
@@ -503,12 +517,16 @@ class DataManager:
                             start = df['open_time'].min()
                             end = df['open_time'].max()
                             count = len(df)
+                            mtime = os.path.getmtime(path)
+                            size_mb = os.path.getsize(path) / (1024 * 1024)
                             metadata.append({
-                                'Symbol': symbol,
-                                'Interval': interval,
-                                'Start Date': start,
-                                'End Date': end,
-                                'Count': count
+                                'ticker': symbol,
+                                'interval': interval,
+                                'start_date': str(start),
+                                'end_date': str(end),
+                                'count': int(count),
+                                'size_mb': float(size_mb),
+                                'last_modified': float(mtime)
                             })
                 except Exception as e:
                     logger.error(f"Error reading metadata for {f}: {e}")

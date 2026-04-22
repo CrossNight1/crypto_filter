@@ -142,9 +142,9 @@ class MetricsEngine:
         volume = df['volume']
         
         # Scaling factors for related windows
-        w_slow = int(window * 2.5)
-        w_short = max(2, int(window * 0.35))
-        w_mid = max(3, int(window * 0.6))
+        w_slow = int(window * 3)
+        w_short = int(window * 0.5)
+        w_mid = window
 
         # Core returns calculation
         ret = close.pct_change()
@@ -171,7 +171,7 @@ class MetricsEngine:
             res['rsi_norm'] = (MetricsEngine.rsi(close, window) - 50) / 100
                 
         # 6. Normalized ATR: ATR / Close
-        if should_calc('atr_norm') or should_calc('vam') or should_calc('vol_atr'):
+        if should_calc('atr_norm') or should_calc('vol_atr'):
             atr_s = MetricsEngine.atr(high, low, close, w_short)
             atr_norm = atr_s / close.replace(0, 1e-9)
             if should_calc('atr_norm'):
@@ -198,10 +198,10 @@ class MetricsEngine:
             else:
                 res['rel_strength_z'] = np.nan
             
-        # 10. Volatility-Adjusted Momentum (VAM): ROC / (ATR / Close)
+        # 10. Volatility-Adjusted Momentum (VAM): ROC / (ATR / Vola)
         if should_calc('vam'):
             roc = close.pct_change(w_short)
-            res['vam'] = roc / atr_norm
+            res['vam'] = roc / ret.ewm(span=window).std()
         
         # 11. Return Skewness (Rolling)
         if should_calc('skewness'):
@@ -256,12 +256,15 @@ class MetricsEngine:
         # 228. FIP (Frog-in-the-Pan)
         if should_calc('fip'):
             def fip_func(x):
-                total_ret = np.sum(x)
-                sign_ret = np.sign(total_ret)
-                n = len(x)
-                neg_pct = np.sum(x < 0) / n
-                pos_pct = np.sum(x > 0) / n
-                return sign_ret * (neg_pct - pos_pct)
+                pos = x[x > 0].sum()
+                neg = np.abs(x[x < 0].sum())
+                
+                denom = pos + neg
+                if denom == 0:
+                    return 0.0
+                
+                return (pos - neg) / denom
+
             res['fip'] = ret.rolling(window).apply(fip_func, raw=True)
         
         # Price Z-Score & SMA Diff
@@ -287,6 +290,12 @@ class MetricsEngine:
             if should_calc('avg_drawdown'):
                 # Average of drawdown events (where DD < 0)
                 res['avg_drawdown'] = drawdowns.where(drawdowns < 0).rolling(window=window, min_periods=1).mean()
+
+        # 273. Breakout Score
+        if should_calc('breakout_score_up') or should_calc('breakout_score_down'):
+            bku, bkd = MetricsEngine.calculate_breakout_score(df)
+            if should_calc('breakout_score_up'): res['breakout_score_up'] = bku
+            if should_calc('breakout_score_down'): res['breakout_score_down'] = bkd
 
         return res
 
@@ -467,6 +476,185 @@ class MetricsEngine:
         hist, tau, smooth = MetricsEngine.calculate_custom_adf_series(series, lookback)
         # Return the *latest* value (last valid point)
         return hist.iloc[-1], tau.iloc[-1], smooth.iloc[-1]
+
+    @staticmethod
+    def calculate_breakout_score(df: pd.DataFrame, 
+                                 len_up: int = 10, len_down: int = 10, 
+                                 mult_base: float = 1.0, calcMethod: str = "Stdev",
+                                 maMin: int = 10, period: int = 50,
+                                 volFactor: float = 0.15, z_score_val: float = 0.5) -> tuple:
+        """
+        Calculates breakout trendline score.
+        Returns: score_up, score_down (as pd.Series)
+        """
+        close = df['close'].values.astype(float)
+        high = df['high'].values.astype(float)
+        low = df['low'].values.astype(float)
+        n = len(close)
+        
+        if n < max(len_up, len_down, period):
+            return pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
+
+        def rma(x, n_period):
+            a = np.full_like(x, np.nan)
+            if len(x) < n_period: return a
+            start_idx = -1
+            for i in range(len(x)):
+                if not np.isnan(x[i]):
+                    if start_idx == -1:
+                        start_idx = i
+                    if i - start_idx + 1 == n_period:
+                        a[i] = np.nanmean(x[start_idx:i+1])
+                        alpha = 1.0 / n_period
+                        for j in range(i+1, len(x)):
+                            a[j] = alpha * x[j] + (1 - alpha) * a[j-1]
+                        break
+            return a
+
+        def stdev_func(x, n_period):
+            return pd.Series(x).rolling(n_period).std(ddof=0).values
+
+        def get_pivots(src, left, right, is_high):
+            pivots = np.full(n, np.nan)
+            for i in range(left + right, n):
+                idx = i - right
+                is_pivot = True
+                
+                for j in range(idx - left, idx):
+                    if is_high and src[j] >= src[idx]:
+                        is_pivot = False; break
+                    if not is_high and src[j] <= src[idx]:
+                        is_pivot = False; break
+                if not is_pivot: continue
+                
+                for j in range(idx + 1, i + 1):
+                    if is_high and src[j] >= src[idx]:
+                        is_pivot = False; break
+                    if not is_high and src[j] <= src[idx]:
+                        is_pivot = False; break
+                        
+                if is_pivot:
+                    pivots[i] = src[idx]
+            return pivots
+
+        tr = np.zeros_like(close)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr_len_up = rma(tr, len_up)
+        atr_len_down = rma(tr, len_down)
+        atr_14 = rma(tr, 14)
+        
+        logret = np.zeros_like(close)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            logret[1:] = np.log(close[1:] / close[:-1])
+        logret[0] = 0.0
+        logret = np.nan_to_num(logret)
+        
+        vol_vama = stdev_func(logret, period)
+        targetVol = stdev_func(logret, period * 30) * volFactor
+        
+        vamaC = np.full(n, np.nan)
+        
+        span_val = float(maMin)
+        for i in range(n):
+            if not np.isnan(vol_vama[i]) and vol_vama[i] > 0 and not np.isnan(targetVol[i]):
+                scale = min(targetVol[i] / vol_vama[i], 1.0)
+                span_val = max(np.floor(maMin / scale), 1.0)
+            
+            alpha = 1.0 / (span_val + 1.0)
+            
+            if i == 0 or np.isnan(vamaC[i-1]):
+                vamaC[i] = close[i]
+            else:
+                vamaC[i] = alpha * close[i] + (1 - alpha) * vamaC[i-1]
+
+        vr = np.ones(n)
+        for i in range(n):
+            if not np.isnan(vol_vama[i]) and not np.isnan(targetVol[i]) and vol_vama[i] > 0 and targetVol[i] > 0:
+                vr[i] = vol_vama[i] / targetVol[i]
+
+        beta = 0.5
+        mult_dyn = mult_base * np.power(vr, -beta)
+        mult_dyn = np.clip(mult_dyn, mult_base * 0.5, mult_base * 2.0)
+        
+        ph = get_pivots(high, len_up, len_up, True)
+        pl = get_pivots(low, len_down, len_down, False)
+        
+        slope_up = np.zeros(n)
+        slope_down = np.zeros(n)
+        
+        if calcMethod == "Atr":
+            slope_up = (atr_len_up / len_up) * mult_dyn
+            slope_down = (atr_len_down / len_down) * mult_dyn
+        elif calcMethod == "Stdev":
+            slope_up = (stdev_func(close, len_up) / len_up) * mult_dyn
+            slope_down = (stdev_func(close, len_down) / len_down) * mult_dyn
+        elif calcMethod == "Linreg":
+            def sma(x, p):
+                return pd.Series(x).rolling(p).mean().values
+            def variance(x, p):
+                return pd.Series(x).rolling(p).var(ddof=0).values
+                
+            bar_index = np.arange(n)
+            sma_src_n_up = sma(close * bar_index, len_up)
+            sma_src_up = sma(close, len_up)
+            sma_n_up = sma(bar_index, len_up)
+            var_n_up = variance(bar_index, len_up)
+            var_safe_up = np.where(var_n_up == 0, 1, var_n_up)
+            slope_up = np.abs(sma_src_n_up - sma_src_up * sma_n_up) / var_safe_up / 2 * mult_dyn
+            
+            sma_src_n_down = sma(close * bar_index, len_down)
+            sma_src_down = sma(close, len_down)
+            sma_n_down = sma(bar_index, len_down)
+            var_n_down = variance(bar_index, len_down)
+            var_safe_down = np.where(var_n_down == 0, 1, var_n_down)
+            slope_down = np.abs(sma_src_n_down - sma_src_down * sma_n_down) / var_safe_down / 2 * mult_dyn
+
+        upper = np.zeros(n)
+        lower = np.zeros(n)
+        slope_ph = np.zeros(n)
+        slope_pl = np.zeros(n)
+        
+        for i in range(1, n):
+            is_ph = not np.isnan(ph[i])
+            is_pl = not np.isnan(pl[i])
+            
+            c_slope_up = slope_up[i] if not np.isnan(slope_up[i]) else 0.0
+            c_slope_down = slope_down[i] if not np.isnan(slope_down[i]) else 0.0
+            
+            slope_ph[i] = c_slope_up if is_ph else slope_ph[i-1]
+            slope_pl[i] = c_slope_down if is_pl else slope_pl[i-1]
+            
+            upper[i] = ph[i] if is_ph else upper[i-1] - slope_ph[i]
+            lower[i] = pl[i] if is_pl else lower[i-1] + slope_pl[i]
+            
+        d_up = np.zeros(n)
+        d_down = np.zeros(n)
+        
+        for i in range(1, n):
+            c = close[i]
+            a = atr_14[i] if not np.isnan(atr_14[i]) and atr_14[i] != 0 else 1.0
+            
+            if c > upper[i]:
+                d_up[i] = (c - (upper[i] - slope_ph[i])) / a
+            else:
+                d_up[i] = 0
+                
+            if c < lower[i]:
+                d_down[i] = ((lower[i] + slope_pl[i]) - c) / a
+            else:
+                d_down[i] = 0
+                
+        k = 0.1
+        bku_score = d_up * np.exp(-k * d_up * d_up)
+        bkd_score = d_down * np.exp(-k * d_down * d_down)
+        
+        score_up = 0.5 * bku_score
+        score_down = 0.5 * bkd_score
+        
+        return pd.Series(score_up, index=df.index).fillna(0), pd.Series(score_down, index=df.index).fillna(0)
 
     @staticmethod
     def calculate_fip(returns: np.ndarray) -> float:

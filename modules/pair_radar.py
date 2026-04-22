@@ -61,7 +61,7 @@ def pair_radar_ui():
                         3,
                         ui.card(
                             ui.card_header("Setup"),
-                            ui.input_radio_buttons(
+                            ui.input_selectize(
                                 "copula_mode",
                                 "Copula Data Mode",
                                 choices={
@@ -69,13 +69,33 @@ def pair_radar_ui():
                                     "log_rets": "Log Returns"
                                 },
                                 selected="price",
-                                inline=True
+                                multiple=False
                             ),
-                            ui.input_numeric(
-                                "r_window",
-                                "Group Return Window",
-                                value=10,
-                                min=1
+                            ui.panel_conditional(
+                                "input.copula_mode === 'log_rets'",
+                                ui.input_numeric(
+                                    "r_window",
+                                    "Group Return Window",
+                                    value=10,
+                                    min=1
+                                )
+                            ),
+                            ui.panel_conditional(
+                                "input.copula_mode === 'price'",
+                                ui.input_switch(
+                                    "copula_stationarize",
+                                    "Stationarize",
+                                    value=False
+                                ),
+                                ui.panel_conditional(
+                                    "input.copula_stationarize",
+                                    ui.input_numeric(
+                                        "copula_ema_window",
+                                        "Smoothing Window",
+                                        value=20,
+                                        min=2
+                                    )
+                                )
                             ),
                             ui.hr(),
                             ui.input_select("copula_type", "Copula Type", 
@@ -102,7 +122,17 @@ def pair_radar_ui():
             ),
             ui.nav_panel("Asset Comparison",
                 ui.card(
-                    ui.card_header("Price Comparison"),
+                    ui.card_header(
+                        "Price Comparison",
+                        ui.input_radio_buttons(
+                            "comp_price_mode",
+                            None,
+                            choices={"vol": "Vol Scale", "stat": "Stationary"},
+                            selected="vol",
+                            inline=True
+                        ),
+                        class_="d-flex justify-content-between align-items-center"
+                    ),
                     output_widget("pair_comp_chart"),
                     full_screen=True
                 )
@@ -115,6 +145,16 @@ def pair_radar_server(input, output, session, global_interval):
     manager = DataManager()
     pair_data = reactive.Value(pd.DataFrame())
     metrics_res = reactive.Value({})
+    
+    # Manual debounce for copula inputs
+    copula_trigger = reactive.Value(0)
+    
+    @reactive.effect
+    @reactive.event(input.copula_ema_window, input.r_window, input.copula_stationarize, input.copula_mode, input.copula_type, input.copula_param)
+    async def _debounce_copula():
+        import asyncio
+        await asyncio.sleep(0.5)
+        copula_trigger.set(copula_trigger.get() + 1)
 
     @reactive.effect
     def populate_selectors():
@@ -262,7 +302,7 @@ def pair_radar_server(input, output, session, global_interval):
             r2 = r_val**2
 
             met = {
-                "HedgeRatio": slope,
+                "Coefficient": slope,
                 "VolRatio": vol_Ratio,
                 "HalfLife": half_life,
                 "SpreadVol": spread_vol,
@@ -436,7 +476,7 @@ def pair_radar_server(input, output, session, global_interval):
 
         # Define all metrics
         metrics = [
-            "HedgeRatio",
+            "Coefficient",
             "VolRatio",
             "ADF_P",
             "R2",
@@ -470,6 +510,7 @@ def pair_radar_server(input, output, session, global_interval):
 
     @reactive.calc
     def copula_stats():
+        copula_trigger.get() # Dependency for manual debounce
         df = pair_data.get()
         if df.empty: return None
 
@@ -477,14 +518,31 @@ def pair_radar_server(input, output, session, global_interval):
         w = max(input.pair_window(), 10)
         df_plot = df.tail(w).copy()
         
-        r_window = max(input.r_window(), 1) if input.r_window() else 1
+        r_window = max(int(input.r_window() or 1), 1)
 
         if mode == "price":
             # Note: price_a in synthetic is log(price)
-            x_raw = np.exp(df_plot["price_a"].values)
-            y_raw = np.exp(df_plot["price_b"].values)
-            title_suffix = " (Price Levels)"
+            # Use full df for EMA calculation to avoid edge effects
+            p_a_full = np.exp(df["price_a"])
+            p_b_full = np.exp(df["price_b"])
+
+            if input.copula_stationarize():
+                try:
+                    ew = max(int(input.copula_ema_window() or 20), 2)
+                except (TypeError, ValueError):
+                    ew = 20
+                x_full = p_a_full / p_a_full.ewm(span=ew).mean()
+                y_full = p_b_full / p_b_full.ewm(span=ew).mean()
+                title_suffix = f" (Stationary Price, {ew} EMA)"
+            else:
+                x_full = p_a_full
+                y_full = p_b_full
+                title_suffix = " (Price Levels)"
+            
+            x_raw = x_full.tail(w).values
+            y_raw = y_full.tail(w).values
         else:
+            df_plot = df.tail(w).copy()
             df_plot = df_plot.dropna(subset=["log_ret_a", "log_ret_b"])
             if len(df_plot) < 2 or r_window < 2:
                 x_raw = df_plot["log_ret_a"].values
@@ -751,26 +809,65 @@ def pair_radar_server(input, output, session, global_interval):
             shared_xaxes=True,
             vertical_spacing=0.03,
             row_heights=[0.6, 0.2, 0.2],
-            specs=[[{"secondary_y": False}], [{}], [{}]]
+            specs=[[{"secondary_y": True}], [{}], [{}]]
         )
 
-        # --- Row 1: Performance Comparison ---
-        # Vol scaled
-        fig.add_trace(go.Scatter(
-            x=df_plot.index,
-            y=cum_ret_a_scaled,
-            name=f"{input.symbol_a()} Vol Scaled",
-            line=dict(color="#FFD60A", width=1),
-            opacity=1
-        ), row=1, col=1, secondary_y=False)
+        # --- Stationary Price Calculation ---
+        try:
+            ew_comp = max(int(input.copula_ema_window() or 20), 2)
+        except (TypeError, ValueError):
+            ew_comp = 20
+            
+        p_a_full = np.exp(df["price_a"])
+        p_b_full = np.exp(df["price_b"])
+        stat_a_full = p_a_full / p_a_full.ewm(span=ew_comp).mean()
+        stat_b_full = p_b_full / p_b_full.ewm(span=ew_comp).mean()
+        
+        stat_a = stat_a_full.tail(input.pair_window()).values
+        stat_b = stat_b_full.tail(input.pair_window()).values
 
-        fig.add_trace(go.Scatter(
-            x=df_plot.index,
-            y=cum_ret_b_scaled,
-            name=f"{input.symbol_b()} Vol Scaled",
-            line=dict(color="#FF006E", width=1),
-            opacity=1
-        ), row=1, col=1, secondary_y=False)
+        # --- Row 1: Performance Comparison ---
+        mode = input.comp_price_mode()
+        
+        if mode == "vol":
+            # Vol scaled
+            fig.add_trace(go.Scatter(
+                x=df_plot.index,
+                y=cum_ret_a_scaled,
+                name=f"{input.symbol_a()} Vol Scaled",
+                line=dict(color="#FFD60A", width=1.5),
+                opacity=1
+            ), row=1, col=1, secondary_y=False)
+
+            fig.add_trace(go.Scatter(
+                x=df_plot.index,
+                y=cum_ret_b_scaled,
+                name=f"{input.symbol_b()} Vol Scaled",
+                line=dict(color="#FF006E", width=1.5),
+                opacity=1
+            ), row=1, col=1, secondary_y=False)
+            
+            fig.update_yaxes(title_text="Cumulative Log Return", row=1, col=1, secondary_y=False)
+
+        elif mode == "stat":
+            # Stationary Prices
+            fig.add_trace(go.Scatter(
+                x=df_plot.index,
+                y=stat_a,
+                name=f"{input.symbol_a()} Stationary",
+                line=dict(color="#00FFFF", width=1.5),
+                opacity=0.9
+            ), row=1, col=1, secondary_y=False)
+
+            fig.add_trace(go.Scatter(
+                x=df_plot.index,
+                y=stat_b,
+                name=f"{input.symbol_b()} Stationary",
+                line=dict(color="#FAFF00", width=1.5),
+                opacity=0.9
+            ), row=1, col=1, secondary_y=False)
+            
+            fig.update_yaxes(title_text="Ratio to EMA", row=1, col=1, secondary_y=False)
 
         # # Cointegration scaled price
         # fig.add_trace(go.Scatter(

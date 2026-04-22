@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from src.data import BinanceFuturesFetcher, DataManager
 from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, DEFAULT_FETCH_INTERVALS
 import asyncio
+import requests
 
 def data_loader_ui():
     return ui.page_fluid(
@@ -252,6 +253,15 @@ def data_loader_server(input, output, session):
                             current_logs.append(f"  > Limit: Synced {len(df)} candles")
                         else:
                             current_logs.append(f"  > Up to date / No data")
+                except requests.exceptions.HTTPError as e:
+                    status_code = e.response.status_code
+                    if status_code in [418, 429]:
+                        current_logs.append(f"  ! CRITICAL: Rate Limit reached ({status_code}). Aborting.")
+                        logs.set(current_logs[:])
+                        is_fetching.set(False)
+                        ui.notification_show(f"Aborted: Rate Limit ({status_code})", type="error")
+                        return
+                    current_logs.append(f"  ! HTTP Error {status_code}: {str(e)}")
                 except Exception as e:
                     current_logs.append(f"  ! Error: {str(e)}")
 

@@ -11,6 +11,7 @@ from ml_engine.analysis.multivariate import MatrixEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -49,6 +50,22 @@ def multivariate_analysis_ui():
                     ),
 
                     ui.panel_conditional(
+                        "input.dependence_structure === 'Correlation' || input.dependence_structure === 'Partial Correlation' || input.dependence_structure === 'Covariance'",
+                        ui.input_select(
+                            "data_source",
+                            "Data Source",
+                            choices={"price": "Price", "return": "Return"},
+                            selected="return"
+                        ),
+                        ui.input_select(
+                            "data_structure",
+                            "Data Structure",
+                            choices={"raw": "Raw", "ranking": "Ranking (0-1)", "sign": "Sign (-1, 0, 1)"},
+                            selected="raw"
+                        ),
+                    ),
+
+                    ui.panel_conditional(
                         "input.dependence_structure === 'Correlation'",
                         ui.input_select(
                             "corr_method",
@@ -57,24 +74,30 @@ def multivariate_analysis_ui():
                         ),
                     ),
 
+                    ui.input_switch(
+                        "cluster_matrix",
+                        "Cluster Assets",
+                        value=True
+                    ),
+
                     ui.panel_conditional(
                         "input.dependence_structure === 'Arbitrage'",
                         ui.input_select(
                             "arb_method",
                             "Method",
                             choices={
+                                "arbitrage_score": "Pair Score",
                                 "cointegration": "Cointegration", 
                                 "zscore": "Z-Score", 
                                 "halflife": "Half-life", 
-                                "vol_ratio": "Volatility Ratio",
-                                "arbitrage_score": "Arbitrage Score"
+                                "vol_ratio": "Volatility Ratio"
                             }
                         ),
                     ),
 
                     ui.panel_conditional(
-                        "input.arb_method === 'arbitrage_score'",
-                        ui.input_checkbox(
+                        "input.dependence_structure === 'Arbitrage' && input.arb_method === 'arbitrage_score'",
+                        ui.input_switch(
                             "mean_reversion",
                             "Mean Reversion",
                             value=True
@@ -173,7 +196,20 @@ def multivariate_analysis_ui():
                                 "volatility": "Volatility",
                                 "return": "Return"
                             }
-                        ),
+                        )
+                    ),
+
+                    ui.input_select(
+                        "decomp_data_source",
+                        "Data Source",
+                        choices={"price": "Price", "return": "Return"},
+                        selected="return"
+                    ),
+                    ui.input_select(
+                        "decomp_data_structure",
+                        "Data Structure",
+                        choices={"raw": "Raw", "ranking": "Ranking (0-1)", "sign": "Sign (-1, 0, 1)"},
+                        selected="raw"
                     ),
 
                     ui.input_select("decomp_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1h"),
@@ -363,7 +399,15 @@ def multivariate_analysis_server(input, output, session):
         
         with ui.Progress(min=0, max=100) as p:
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
-            top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            try:
+                top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            except requests.exceptions.HTTPError as e:
+                ui.notification_show(f"Market Fetch Error: {e.response.status_code}", type="error")
+                top_syms = [] # Fallback to empty, will use MANDATORY_CRYPTO
+            except Exception as e:
+                ui.notification_show(f"Unexpected Error: {str(e)}", type="error")
+                top_syms = []
+
             syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
             syms = [s for s in syms if s not in IGNORED_CRYPTO]
             selected_symbols_corr.set(set(syms))
@@ -397,27 +441,37 @@ def multivariate_analysis_server(input, output, session):
             # 1. Check data availability
             p.set(10, message="Checking data...", detail=f"Preparing {len(syms)} assets")
             symbols = syms
+            dsource = input.data_source() if structure != "Arbitrage" else "price"
+            dstruct = input.data_structure() if structure != "Arbitrage" else "raw"
+
             if structure == "Correlation":
-                data_map = _load_return_data(symbols, interval, p)
+                # Load price data and let MatrixEngine handle transformations
+                data_map = _load_price_data(symbols, interval, p)
                 if not data_map: return
                 raw_matrix = MatrixEngine.calculate_matrix(
                     data_map,
                     method=input.corr_method(),
-                    window_size=input.window_size()
+                    window_size=input.window_size(),
+                    data_source=dsource,
+                    data_structure=dstruct
                 )
             elif structure == "Covariance":
-                data_map = _load_return_data(symbols, interval, p)
+                data_map = _load_price_data(symbols, interval, p)
                 if not data_map: return
                 raw_matrix = MatrixEngine.calculate_covariance(
                     data_map,
-                    window_size=input.window_size()
+                    window_size=input.window_size(),
+                    data_source=dsource,
+                    data_structure=dstruct
                 )
             elif structure == "Partial Correlation":
-                data_map = _load_return_data(symbols, interval, p)
+                data_map = _load_price_data(symbols, interval, p)
                 if not data_map: return
                 raw_matrix = MatrixEngine.calculate_partial_correlation(
                     data_map,
-                    window_size=input.window_size()
+                    window_size=input.window_size(),
+                    data_source=dsource,
+                    data_structure=dstruct
                 )
             elif structure == "Arbitrage":
                 method = input.arb_method()
@@ -464,7 +518,35 @@ def multivariate_analysis_server(input, output, session):
                 return
 
             filtered_matrix, _ = MatrixEngine.filter_blanks(raw_matrix)
-            # filtered_matrix = filtered_matrix.sort_values(by=filtered_matrix.columns[0], ascending=False)
+            
+            # --- Clustering Reordering ---
+            if input.cluster_matrix() and not filtered_matrix.empty and len(filtered_matrix) > 2:
+                try:
+                    from scipy.cluster.hierarchy import leaves_list
+                    # # 1. Use Correlation as basis for distance if structure isn't Correlation
+                    # if structure == "Correlation":
+                    #     corr_for_dist = filtered_matrix
+                    # else:
+                    #     # Fallback to standard correlation for the same symbols for clustering order
+                    #     data_map_filtered = {s: data_map[s] for s in filtered_matrix.columns}
+                    #     corr_for_dist = MatrixEngine.calculate_matrix(data_map_filtered, window_size=input.window_size())
+                    
+                    corr_for_dist = filtered_matrix
+                    
+                    # 2. Get Distance Matrix
+                    dist_df = DecompositionEngine.distance_matrix(corr_for_dist.fillna(0))
+                    
+                    # 3. Hierarchical Linkage
+                    res_cluster = DecompositionEngine.hierarchical_cluster(dist_df, method="complete")
+                    Z = res_cluster['linkage_matrix']
+                    
+                    # 4. Reorder
+                    new_order_idxs = leaves_list(Z)
+                    new_order = [filtered_matrix.columns[i] for i in new_order_idxs]
+                    filtered_matrix = filtered_matrix.loc[new_order, new_order]
+                except Exception as e:
+                    print(f"Clustering error: {e}")
+
             correlation_matrix.set(filtered_matrix)
 
     @render.ui
@@ -517,7 +599,7 @@ def multivariate_analysis_server(input, output, session):
         clean_df = _sanitize(df)
 
         if structure == "Correlation" or structure == "Partial Correlation":
-            zmin, zmax = -1, 1
+            zmin, zmax = clean_df.min().min(), clean_df.max().max()
         elif structure == "Arbitrage":
             method = input.arb_method()
             if method == "cointegration":
@@ -526,7 +608,7 @@ def multivariate_analysis_server(input, output, session):
                 zmin = c_min if np.isfinite(c_min) else -5
                 zmax = c_max if np.isfinite(c_max) else 0
             elif method == "zscore":
-                zmin, zmax = -3, 3
+                zmin, zmax = clean_df.min().min(), clean_df.max().max()
             elif method == "vol_ratio":
                 c_max = clean_df.max().max()
                 zmin = 0
@@ -563,9 +645,9 @@ def multivariate_analysis_server(input, output, session):
                     type="rect",
                     xref="x",
                     yref="paper",
-                    x0=col_idx - 0.52,
+                    x0=col_idx - 0.51,
                     y0=0,
-                    x1=col_idx + 0.52,
+                    x1=col_idx + 0.51,
                     y1=1,
                     line=dict(color="#000000", width=3),
                     fillcolor="rgba(0,0,0,0)",
@@ -593,10 +675,10 @@ def multivariate_analysis_server(input, output, session):
                     xref="paper",
                     yref="y",
                     x0=0,
-                    y0=row_idx - 0.2,
+                    y0=row_idx - 0.51,
                     x1=1,
-                    y1=row_idx + 0.2,
-                    line=dict(color="#000000", width=10),
+                    y1=row_idx + 0.51,
+                    line=dict(color="#000000", width=3),
                     fillcolor="rgba(0,0,0,0)",
                     layer="above"
                 ))
@@ -606,10 +688,10 @@ def multivariate_analysis_server(input, output, session):
                     xref="paper",
                     yref="y",
                     x0=0,
-                    y0=row_idx - 0.2,
+                    y0=row_idx - 0.5,
                     x1=1,
-                    y1=row_idx + 0.2,
-                    line=dict(color="#FFFFFF", width=3),
+                    y1=row_idx + 0.5,
+                    line=dict(color="#FFFFFF", width=2),
                     fillcolor="rgba(0,0,0,0)",
                     layer="above"
                 ))
@@ -639,7 +721,15 @@ def multivariate_analysis_server(input, output, session):
         
         with ui.Progress(min=0, max=100) as p:
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
-            top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            try:
+                top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            except requests.exceptions.HTTPError as e:
+                ui.notification_show(f"Market Fetch Error: {e.response.status_code}", type="error")
+                top_syms = []
+            except Exception as e:
+                ui.notification_show(f"Unexpected Error: {str(e)}", type="error")
+                top_syms = []
+
             syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
             syms = [s for s in syms if s not in IGNORED_CRYPTO]
             selected_symbols_decomp.set(set(syms))
@@ -675,27 +765,40 @@ def multivariate_analysis_server(input, output, session):
             # 1. Check data availability
             p.set(10, message="Checking data...", detail=f"Preparing {len(syms)} assets")
             symbols = syms
-            data_map = _load_return_data(symbols, interval, p)
-            # Build correlation matrix as base for most methods
+            dsource = input.decomp_data_source()
+            dstruct = input.decomp_data_structure()
 
-            df_aligned = pd.DataFrame(data_map).dropna()
+            data_map = _load_price_data(symbols, interval, p)
+            # Build correlation matrix as base for most methods
             
             # Use aligned data for calculations
-            corr = MatrixEngine.calculate_matrix(data_map, method="pearson", window_size=window)
+            corr = MatrixEngine.calculate_matrix(
+                data_map, 
+                method="pearson", 
+                window_size=window,
+                data_source=dsource,
+                data_structure=dstruct
+            )
             corr_clean, _ = MatrixEngine.filter_blanks(corr)
 
             step = 20
             step += 1
             p.set(step, message=f"Running {method}...")
 
-            # Store aligned returns for context chart
-            wide_df = pd.DataFrame(data_map)[-100:]
-            wide_df = wide_df.dropna(axis=1, how="all")
-            wide_df = wide_df.dropna(axis=0, how="all")
-            wide_df = wide_df[corr_clean.columns]
+            # Store aligned data for decomposition engines
+            # We first align symbols from corr_clean
+            aligned_price_map = {s: data_map[s] for s in corr_clean.columns if s in data_map}
+            wide_df_raw = pd.DataFrame(aligned_price_map).iloc[-window:].dropna()
             
+            # Transform data for decomposition
+            wide_df = MatrixEngine._prepare_data(wide_df_raw, data_source=dsource, data_structure=dstruct)
+            
+            if wide_df.empty:
+                ui.notification_show("Not enough aligned data for decomposition", type="warning")
+                return
+
             T = len(wide_df)
-            N = len(corr_clean.columns)
+            N = len(wide_df.columns)
 
             result = {
                 'method': method,
@@ -733,10 +836,10 @@ def multivariate_analysis_server(input, output, session):
                 # result['data'] = DecompositionEngine.mst_spillover(dist)
                 s_type = input.spillover_type()
                 if s_type == "volatility":
-                    vol = df_aligned.ewm(span=window, adjust=False).std().dropna()
+                    vol = wide_df.ewm(span=window, adjust=False).std().dropna()
                     result['data'] = DecompositionEngine.vol_spillover(vol)
                 else:
-                    result['data'] = DecompositionEngine.return_spillover(df_aligned)
+                    result['data'] = DecompositionEngine.return_spillover(wide_df)
                 result['spillover_type'] = s_type
 
             result['corr'] = corr_clean

@@ -11,6 +11,7 @@ from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS
 from src.logger import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy import stats
+import requests
 
 def market_radar_ui():
     return ui.navset_card_underline(
@@ -275,8 +276,13 @@ def market_radar_server(input, output, session, global_interval):
     def _initialize_symbols():
         # Only initialize with mandatory if we don't have symbols yet
         if not selected_symbols_radar.get():
-            n = int(input.n_assets_radar() or 20)
-            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            try:
+                n = int(input.n_assets_radar() or 20)
+                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            except Exception as e:
+                logger.log("Market Radar", "ERROR", f"Initial symbol sync failed: {e}")
+                syms = []
+            
             new_syms = set(MANDATORY_CRYPTO).union(syms)
             new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
             selected_symbols_radar.set(new_syms)
@@ -286,7 +292,12 @@ def market_radar_server(input, output, session, global_interval):
     def _update_radar_symbols_list():
         try:
             n = int(input.n_assets_radar() or 20)
-            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            try:
+                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            except Exception as e:
+                logger.log("Market Radar", "ERROR", f"Radar volume filter failed: {e}")
+                syms = []
+            
             new_syms = set(MANDATORY_CRYPTO).union(syms)
             # Remove ignored symbols
             new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
@@ -306,7 +317,12 @@ def market_radar_server(input, output, session, global_interval):
         try:
             val = input.n_assets_rpg()
             n = int(val) if val else 20
-            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            try:
+                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            except Exception as e:
+                logger.log("Market Radar", "ERROR", f"RPG volume filter failed: {e}")
+                syms = []
+            
             new_syms = set(MANDATORY_CRYPTO).union(syms)
             # Remove ignored symbols
             new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
@@ -356,7 +372,11 @@ def market_radar_server(input, output, session, global_interval):
         with ui.Progress(min=0, max=100) as p:
             # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
-            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            try:
+                new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            except Exception as e:
+                ui.notification_show(f"Market Data Error: {str(e)}", type="error")
+                new_syms = []
             syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
             # Filter ignored
             syms = [s for s in syms if s not in IGNORED_CRYPTO]
@@ -391,7 +411,11 @@ def market_radar_server(input, output, session, global_interval):
         with ui.Progress(min=0, max=100) as p:
             # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
-            new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            try:
+                new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+            except Exception as e:
+                ui.notification_show(f"Path Analysis Error: {str(e)}", type="error")
+                new_syms = []
             syms = sorted(list(set(MANDATORY_CRYPTO).union(new_syms)))
             selected_symbols_rpg.set(set(syms))
             
@@ -811,7 +835,12 @@ def market_radar_server(input, output, session, global_interval):
         # Use centralized universe instead of local inventory
         all_syms = manager.get_universe()
         n = int(input.n_assets_radar() or 20)
-        syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+        try:
+            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+        except Exception as e:
+            logger.log("Market Radar", "ERROR", f"Initial pop-up sync failed: {e}")
+            syms = []
+            
         new_syms = set(MANDATORY_CRYPTO).union(syms)
         new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
         ui.update_selectize("radar_symbols", choices=all_syms, selected=sorted(list(new_syms)), server=True)

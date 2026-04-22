@@ -16,6 +16,7 @@ from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
+import requests
 from ml_engine.labeling.labeler import Labeler
 from ml_engine.analysis.multivariate import DecompositionEngine
 from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
@@ -465,7 +466,11 @@ def symbol_diagnostics_server(input, output, session, global_interval):
 
             # 7. Orderbook Status
             p.set(95, message="Fetching Orderbook...")
-            book_status = manager.fetcher.get_books_status(symbol)
+            try:
+                book_status = manager.fetcher.get_books_status(symbol)
+            except Exception as e:
+                logger.log("Symbol Diagnostics", "ERROR", f"Orderbook fetch failed: {e}")
+                book_status = {}
 
             # Pack Data
             data_pack = {
