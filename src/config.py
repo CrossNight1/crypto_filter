@@ -87,6 +87,7 @@ METRIC_LABELS = {
 
 # List of all available numeric metrics for axes
 ALL_METRICS = [
+    'rel_strength_z',
     'price_zscore', 'vam',
     'volatility','vol_imbalance', 'fip', 
     'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
@@ -98,6 +99,7 @@ ALL_METRICS = [
 ]
 
 DEFAULT_FEATURES = [
+    'rel_strength_z',
     'fip', 
     'adf_hist', 'ewva', 'aroon_osc', 
     'atr_norm', 'vol_atr', 'vama', 'cmf', 'vam', 'skewness',

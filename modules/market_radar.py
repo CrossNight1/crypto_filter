@@ -57,21 +57,21 @@ def market_radar_ui():
                         "x_axis",
                         "X Axis",
                         choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected=ALL_METRICS[0]
+                        selected="rel_strength_z"
                     ),
 
                     ui.input_select(
                         "y_axis",
                         "Y Axis",
                         choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected=ALL_METRICS[1]
+                        selected="breakout_score_dist"
                     ),
 
                     ui.input_select(
                         "z_axis",
                         "Z Axis",
                         choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}},
-                        selected=ALL_METRICS[2]
+                        selected="volume_imbalance"
                     ),
 
                     # ----- LOG SCALE (single row) -----
@@ -169,14 +169,14 @@ def market_radar_ui():
                         "rpg_x",
                         "X Axis",
                         choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected=ALL_METRICS[2]
+                        selected="rel_strength_z"
                     ),
 
                     ui.input_select(
                         "rpg_y",
                         "Y Axis",
                         choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected=ALL_METRICS[3]
+                        selected="breakout_score_dist"
                     ),
 
                     # ----- LOG SCALE (single row) -----

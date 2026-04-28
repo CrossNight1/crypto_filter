@@ -71,17 +71,17 @@ app_ui = ui.page_navbar(
                         ui.p("Cross-asset correlation & Multivariate construction."),
                         ui.input_action_button("go_multivariate", "multivariate_analysis", class_="btn-primary w-100")
                     ),
-                    ui.card(
-                        ui.card_header("Predictive"),
-                        ui.p("ML forecasting with meta-labeling verification protocols."),
-                        ui.input_action_button("go_predictive", "explore_models", class_="btn-primary w-100")
-                    ),
+                    # ui.card(
+                    #     ui.card_header("Predictive"),
+                    #     ui.p("ML forecasting with meta-labeling verification protocols."),
+                    #     ui.input_action_button("go_predictive", "explore_models", class_="btn-primary w-100")
+                    # ),
                     ui.card(
                         ui.card_header("Pair Radar"),
                         ui.p("Statistical arbitrage & pair trading analytics."),
                         ui.input_action_button("go_pair_radar", "open_pair_radar", class_="btn-primary w-100")
                     ),
-                    col_widths=[4,4,4,4,4]
+                    col_widths=[3,3,3,3]
                 ),
                 class_="hero-container text-center py-5"
             ),
@@ -94,7 +94,7 @@ app_ui = ui.page_navbar(
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
     ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
-    ui.nav_panel("PREDICTIVE", predictive_ui()),
+    # ui.nav_panel("PREDICTIVE", predictive_ui()),
     # ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
     # ui.nav_spacer(),
