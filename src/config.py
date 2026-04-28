@@ -31,8 +31,8 @@ This application allows you to analyze Binance Perpetual Futures with advanced s
 
 # --- DATA SETTINGS ---
 # Symbols that are always fetched
-MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'METISUSDT', 'BTCDOMUSDT']
-IGNORED_CRYPTO = ['PAXGUSDT', 'XAUUSDT', 'XAGUSDT']
+MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'METISUSDT', 'BTCDOMUSDT', 'CLUSDT', 'BZUSDT', 'XAUUSDT', 'XAGUSDT', 'PAXGUSDT' ]
+IGNORED_CRYPTO = []
 
 # Benchmark used for Relative Strength and Beta
 BENCHMARK_SYMBOL = 'BTCUSDT'
@@ -78,8 +78,8 @@ METRIC_LABELS = {
     'vol_rank': 'Volatility Rank',
     'max_drawdown': 'Max Drawdown',
     'avg_drawdown': 'Average Drawdown',
-    'breakout_score_up': 'Breakout Score Up',
-    'breakout_score_down': 'Breakout Score Down',
+    'breakout_score_dist': 'Breakout Score (Dist)',
+    'breakout_score_break': 'Breakout Must Breakout',
     'orderbook_imbalance': 'OBook Imbalance',
     'spread': 'Spread',
     'None': 'None'
@@ -92,7 +92,8 @@ ALL_METRICS = [
     'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
     'rsi_norm', 'atr_norm', 'cmf', 'vwap_z', 'skewness',
     'autocorr_1', 'autocorr_5', 'imbalance_bar', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank',
-    'max_drawdown', 'avg_drawdown', 'breakout_score_up', 'breakout_score_down',
+    'max_drawdown', 'avg_drawdown',
+    'breakout_score_dist', 'breakout_score_break',
     'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20'
 ]
 
@@ -103,5 +104,6 @@ DEFAULT_FEATURES = [
     'sign_lag1', 'sign_lag2', 'sign_lag3',
     'autocorr_1', 'autocorr_5', 
     'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank',
-    'max_drawdown', 'avg_drawdown', 'breakout_score_up', 'breakout_score_down'
+    'max_drawdown', 'avg_drawdown',
+    'breakout_score_dist', 'breakout_score_break'
 ]

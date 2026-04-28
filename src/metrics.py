@@ -130,7 +130,7 @@ class MetricsEngine:
         return pd.Series(res, index=close.index)
 
     @staticmethod
-    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None) -> pd.DataFrame:
+    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Calculates all 11 advanced metrics requested by the user.
         Returns a DataFrame with the same index as the input df.
@@ -190,8 +190,17 @@ class MetricsEngine:
         
         # 9. Relative Strength Z-Score (vs benchmark)
         if should_calc('rel_strength_z'):
-            if benchmark_returns is not None:
-                # Align indices
+            if benchmark_prices is not None:
+                common_idx = df.index.intersection(benchmark_prices.index)
+                if len(common_idx) >= window:
+                    asset_p = df.loc[common_idx, 'close']
+                    btc_p = benchmark_prices.loc[common_idx]
+                    ratio = asset_p / btc_p.replace(0, 1e-9)
+                    res['rel_strength_z'] = (ratio - ratio.rolling(window).mean()) / ratio.rolling(window).std()
+                    res['rel_strength_z'] = res['rel_strength_z'].fillna(0)
+                else:
+                    res['rel_strength_z'] = np.nan
+            elif benchmark_returns is not None:
                 common_idx = ret.index.intersection(benchmark_returns.index)
                 diff = ret.loc[common_idx] - benchmark_returns.loc[common_idx]
                 res['rel_strength_z'] = (diff - diff.ewm(span=window).mean()) / diff.ewm(span=window).std()
@@ -292,10 +301,10 @@ class MetricsEngine:
                 res['avg_drawdown'] = drawdowns.where(drawdowns < 0).rolling(window=window, min_periods=1).mean()
 
         # 273. Breakout Score
-        if should_calc('breakout_score_up') or should_calc('breakout_score_down'):
-            bku, bkd = MetricsEngine.calculate_breakout_score(df)
-            if should_calc('breakout_score_up'): res['breakout_score_up'] = bku
-            if should_calc('breakout_score_down'): res['breakout_score_down'] = bkd
+        if should_calc('breakout_score_dist') or should_calc('breakout_score_break'):
+            bku_dist, bkd_dist, bku_break, bkd_break = MetricsEngine.calculate_breakout_score(df, len_up=30, len_down=30)
+            if should_calc('breakout_score_dist'): res['breakout_score_dist'] = bku_dist - bkd_dist
+            if should_calc('breakout_score_break'): res['breakout_score_break'] = bku_break - bkd_break
 
         return res
 
@@ -479,13 +488,13 @@ class MetricsEngine:
 
     @staticmethod
     def calculate_breakout_score(df: pd.DataFrame, 
-                                 len_up: int = 10, len_down: int = 10, 
-                                 mult_base: float = 1.0, calcMethod: str = "Stdev",
+                                 len_up: int = 30, len_down: int = 30, 
+                                 mult_base: float = 0.5, calcMethod: str = "Atr",
                                  maMin: int = 10, period: int = 50,
-                                 volFactor: float = 0.15, z_score_val: float = 0.5) -> tuple:
+                                 volFactor: float = 0.15, k_decay: float = 2.0, eps: float = 0.2, persistBars: int = 3) -> tuple:
         """
-        Calculates breakout trendline score.
-        Returns: score_up, score_down (as pd.Series)
+        Calculates breakout trendline score (translated from Market_radar Numba logic).
+        Returns: score_up_dist, score_down_dist, score_up_break, score_down_break
         """
         close = df['close'].values.astype(float)
         high = df['high'].values.astype(float)
@@ -493,7 +502,7 @@ class MetricsEngine:
         n = len(close)
         
         if n < max(len_up, len_down, period):
-            return pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
+            return pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
 
         def rma(x, n_period):
             a = np.full_like(x, np.nan)
@@ -570,14 +579,14 @@ class MetricsEngine:
             else:
                 vamaC[i] = alpha * close[i] + (1 - alpha) * vamaC[i-1]
 
-        vr = np.ones(n)
-        for i in range(n):
-            if not np.isnan(vol_vama[i]) and not np.isnan(targetVol[i]) and vol_vama[i] > 0 and targetVol[i] > 0:
-                vr[i] = vol_vama[i] / targetVol[i]
+        vol_sma = pd.Series(vol_vama).rolling(len_up, min_periods=1).mean().values
+        vr_mult = np.ones(n)
+        mask = vol_sma > 0
+        vr_mult[mask] = vol_vama[mask] / vol_sma[mask]
 
-        beta = 0.5
-        mult_dyn = mult_base * np.power(vr, -beta)
-        mult_dyn = np.clip(mult_dyn, mult_base * 0.5, mult_base * 2.0)
+        beta_mult = 0.7
+        mult_dyn = mult_base * np.power(vr_mult, -beta_mult)
+        mult_dyn = np.clip(mult_dyn, mult_base * 0.1, mult_base * 5.0)
         
         ph = get_pivots(high, len_up, len_up, True)
         pl = get_pivots(low, len_down, len_down, False)
@@ -602,59 +611,114 @@ class MetricsEngine:
             sma_src_up = sma(close, len_up)
             sma_n_up = sma(bar_index, len_up)
             var_n_up = variance(bar_index, len_up)
-            var_safe_up = np.where(var_n_up == 0, 1, var_n_up)
+            var_safe_up = np.where(var_n_up == 0, 1.0, var_n_up)
             slope_up = np.abs(sma_src_n_up - sma_src_up * sma_n_up) / var_safe_up / 2 * mult_dyn
             
             sma_src_n_down = sma(close * bar_index, len_down)
             sma_src_down = sma(close, len_down)
             sma_n_down = sma(bar_index, len_down)
             var_n_down = variance(bar_index, len_down)
-            var_safe_down = np.where(var_n_down == 0, 1, var_n_down)
+            var_safe_down = np.where(var_n_down == 0, 1.0, var_n_down)
             slope_down = np.abs(sma_src_n_down - sma_src_down * sma_n_down) / var_safe_down / 2 * mult_dyn
 
-        upper = np.zeros(n)
-        lower = np.zeros(n)
-        slope_ph = np.zeros(n)
-        slope_pl = np.zeros(n)
+        upper = np.full(n, np.nan)
+        lower = np.full(n, np.nan)
+        slope_ph = np.full(n, np.nan)
+        slope_pl = np.full(n, np.nan)
+        
+        upper_proj = np.full(n, np.nan)
+        lower_proj = np.full(n, np.nan)
+        
+        score_up_dist = np.zeros(n)
+        score_down_dist = np.zeros(n)
+        score_up_break = np.zeros(n)
+        score_down_break = np.zeros(n)
+        
+        last_valid_up = -1
+        last_valid_down = -1
+        
+        atr_smoothed = pd.Series(atr_14).rolling(10, min_periods=1).mean().values
         
         for i in range(1, n):
             is_ph = not np.isnan(ph[i])
             is_pl = not np.isnan(pl[i])
             
-            c_slope_up = slope_up[i] if not np.isnan(slope_up[i]) else 0.0
-            c_slope_down = slope_down[i] if not np.isnan(slope_down[i]) else 0.0
+            if is_ph:
+                slope_ph[i] = slope_up[i]
+                upper[i] = ph[i]
+            else:
+                slope_ph[i] = slope_ph[i-1]
+                upper[i] = upper[i-1]
+                
+            if is_pl:
+                slope_pl[i] = slope_down[i]
+                lower[i] = pl[i]
+            else:
+                slope_pl[i] = slope_pl[i-1]
+                lower[i] = lower[i-1]
+                
+            if not np.isnan(upper[i]):
+                upper[i] = upper[i] - (slope_ph[i] if not np.isnan(slope_ph[i]) else 0.0)
+                
+            if not np.isnan(lower[i]):
+                lower[i] = lower[i] + (slope_pl[i] if not np.isnan(slope_pl[i]) else 0.0)
+                
+            upper_proj[i] = upper[i] - (slope_ph[i] * len_up if not np.isnan(slope_ph[i]) else 0.0)
+            lower_proj[i] = lower[i] + (slope_pl[i] * len_down if not np.isnan(slope_pl[i]) else 0.0)
             
-            slope_ph[i] = c_slope_up if is_ph else slope_ph[i-1]
-            slope_pl[i] = c_slope_down if is_pl else slope_pl[i-1]
-            
-            upper[i] = ph[i] if is_ph else upper[i-1] - slope_ph[i]
-            lower[i] = pl[i] if is_pl else lower[i-1] + slope_pl[i]
-            
-        d_up = np.zeros(n)
-        d_down = np.zeros(n)
-        
-        for i in range(1, n):
             c = close[i]
-            a = atr_14[i] if not np.isnan(atr_14[i]) and atr_14[i] != 0 else 1.0
+            a = atr_smoothed[i] if not np.isnan(atr_smoothed[i]) and atr_smoothed[i] != 0 else 1.0
             
-            if c > upper[i]:
-                d_up[i] = (c - (upper[i] - slope_ph[i])) / a
-            else:
-                d_up[i] = 0
+            if not np.isnan(upper_proj[i]):
+                dist_up = abs(c - upper_proj[i]) / a
+                score_up_dist[i] = np.exp(-k_decay * dist_up**2) * (1.0 / (dist_up + eps))
                 
-            if c < lower[i]:
-                d_down[i] = ((lower[i] + slope_pl[i]) - c) / a
-            else:
-                d_down[i] = 0
+            if not np.isnan(lower_proj[i]):
+                dist_down = abs(c - lower_proj[i]) / a
+                score_down_dist[i] = np.exp(-k_decay * dist_down**2) * (1.0 / (dist_down + eps))
                 
-        k = 0.1
-        bku_score = d_up * np.exp(-k * d_up * d_up)
-        bkd_score = d_down * np.exp(-k * d_down * d_down)
+            break_up = False
+            if i > 0 and not np.isnan(upper_proj[i-1]) and not np.isnan(upper_proj[i]):
+                if close[i-1] <= upper_proj[i-1] and close[i] > upper_proj[i]:
+                    break_up = True
+                    
+            break_down = False
+            if i > 0 and not np.isnan(lower_proj[i-1]) and not np.isnan(lower_proj[i]):
+                if close[i-1] >= lower_proj[i-1] and close[i] < lower_proj[i]:
+                    break_down = True
+                    
+            raw_mom = close[i] - close[i-1]
+            valid_break_up = break_up and raw_mom > 0 and close[i] > vamaC[i]
+            valid_break_down = break_down and raw_mom < 0 and close[i] < vamaC[i]
+            
+            if valid_break_up:
+                last_valid_up = i
+            if valid_break_down:
+                last_valid_down = i
+                
+            if last_valid_up != -1 and (i - last_valid_up) < persistBars:
+                score_up_break[i] = 1.0
+            else:
+                score_up_break[i] = 0.0
+                
+            if last_valid_down != -1 and (i - last_valid_down) < persistBars:
+                score_down_break[i] = 1.0
+            else:
+                score_down_break[i] = 0.0
+
+        s_up_dist = pd.Series(score_up_dist).ewm(span=3, adjust=False).mean()
+        s_down_dist = pd.Series(score_down_dist).ewm(span=3, adjust=False).mean()
         
-        score_up = 0.5 * bku_score
-        score_down = 0.5 * bkd_score
+        vama_c_s = pd.Series(vamaC)
+        close_s = pd.Series(close)
         
-        return pd.Series(score_up, index=df.index).fillna(0), pd.Series(score_down, index=df.index).fillna(0)
+        s_up_dist = np.where(close_s > vama_c_s, s_up_dist, 0.0)
+        s_down_dist = np.where(close_s < vama_c_s, s_down_dist, 0.0)
+        
+        return (pd.Series(s_up_dist, index=df.index).fillna(0), 
+                pd.Series(s_down_dist, index=df.index).fillna(0),
+                pd.Series(score_up_break, index=df.index).fillna(0),
+                pd.Series(score_down_break, index=df.index).fillna(0))
 
     @staticmethod
     def calculate_fip(returns: np.ndarray) -> float:
@@ -745,7 +809,7 @@ class MetricsEngine:
         return float(wins / len(log_returns))
 
     @staticmethod
-    def calculate_rolling_metric(df: pd.DataFrame, metric_name: str, window: int = 30, step: int = 1, benchmark_returns: pd.Series = None, interval: str = '1h') -> pd.Series:
+    def calculate_rolling_metric(df: pd.DataFrame, metric_name: str, window: int = 30, step: int = 1, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h') -> pd.Series:
         """
         Calculates a metric over a rolling window.
         Returns a Series of values indexed by the original index.
@@ -761,7 +825,7 @@ class MetricsEngine:
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
         
         # Calculate all standard indicators
-        all_inds = MetricsEngine.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns, interval=interval)
+        all_inds = MetricsEngine.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns, benchmark_prices=benchmark_prices, interval=interval)
         
         if metric_name in all_inds.columns:
             res = all_inds[metric_name]
@@ -785,10 +849,12 @@ class MetricsEngine:
         results = []
         
         # 1. Prepare Benchmark if not provided
-        if benchmark_returns is None and benchmark_symbol in prices_data:
+        benchmark_prices = None
+        if benchmark_symbol in prices_data:
             b_df = prices_data[benchmark_symbol]
-            b_close = pd.to_numeric(b_df['close'], errors='coerce').ffill().fillna(0)
-            benchmark_returns = b_close.pct_change().dropna()
+            benchmark_prices = pd.to_numeric(b_df['close'], errors='coerce').ffill().fillna(0)
+            if benchmark_returns is None:
+                benchmark_returns = benchmark_prices.pct_change().dropna()
             
         from src.data import BinanceFuturesFetcher
         import time
@@ -810,7 +876,7 @@ class MetricsEngine:
                 if len(prices) < 2: continue
                 
                 # Advanced Metrics (Standardized)
-                adv_df = self.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns)
+                adv_df = self.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns, benchmark_prices=benchmark_prices)
                 latest_adv = adv_df.iloc[-1].to_dict()
                 
                 row = {
