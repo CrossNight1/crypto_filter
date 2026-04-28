@@ -78,8 +78,8 @@ METRIC_LABELS = {
     'vol_rank': 'Volatility Rank',
     'max_drawdown': 'Max Drawdown',
     'avg_drawdown': 'Average Drawdown',
-    'breakout_score_dist': 'Breakout Score (Dist)',
-    'breakout_score_break': 'Breakout Must Breakout',
+    'breakout_score_dist': 'Breakout Score v1',
+    'breakout_score_break': 'Breakout Score v2',
     'orderbook_imbalance': 'OBook Imbalance',
     'spread': 'Spread',
     'None': 'None'
