@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, BINANCE_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, TRADINGVIEW_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy import stats
@@ -775,14 +775,22 @@ def market_radar_server(input, output, session, global_interval):
         
         row = symbol_row.iloc[0]
         
+        # TradingView interval mapping
+        tv_intervals = {
+            '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
+            '1h': '60', '2h': '120', '4h': '240', '6h': '360', '8h': '480', '12h': '720',
+            '1d': 'D', '3d': '3D', '1w': 'W'
+        }
+        tv_int = tv_intervals.get(input.radar_interval(), '60')
+
         # Create a formatted display of all metrics
         metrics_html = f"""
         <div style="padding: 15px;">
             <h4 style="color: #FFD700; margin-bottom: 15px;">
                 {selected}
-                <a href="{BINANCE_URL}{selected}" target="_blank" 
-                   style="font-size: 0.8em; margin-left: 10px; color: #1f77b4;">
-                    📊 View on Binance
+                <a href="{TRADINGVIEW_URL}?symbol=BINANCE:{selected}.P&interval={tv_int}" target="_blank" 
+                   style="font-size: 0.8em; margin-left: 10px; color: #1f77b4; text-decoration: none;">
+                    📈 View on TradingView
                 </a>
             </h4>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">

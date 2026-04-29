@@ -42,7 +42,7 @@ AVAILABLE_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '
 DEFAULT_FETCH_INTERVALS = ['1h', '4h', '1d']
 
 # --- EXTERNAL LINKS ---
-BINANCE_URL = "https://www.binance.com/en/futures/"
+TRADINGVIEW_URL = "https://www.tradingview.com/chart/"
 
 # --- METRIC LABELS ---
 METRIC_LABELS = {

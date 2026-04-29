@@ -11,7 +11,7 @@ import numpy as np
 import faicons as fa
 
 from shinywidgets import output_widget, render_widget
-from src.config import APP_TITLE, APP_ICON, WELCOME_TITLE, WELCOME_TEXT, SIDEBAR_INFO, THEME, BG_COLOR, BINANCE_URL
+from src.config import APP_TITLE, APP_ICON, WELCOME_TITLE, WELCOME_TEXT, SIDEBAR_INFO, THEME, BG_COLOR, TRADINGVIEW_URL
 import requests
 import webbrowser
 
@@ -199,11 +199,22 @@ def server(input, output, session):
         if not symbols:
             return
             
-        # Ensure we only open if something was just added
-        # Actually, for selectize multi, just open all and clear
+        try:
+            interval = input.radar_interval()
+        except:
+            interval = "1h"
+
+        # TradingView interval mapping
+        tv_intervals = {
+            '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
+            '1h': '60', '2h': '120', '4h': '240', '6h': '360', '8h': '480', '12h': '720',
+            '1d': 'D', '3d': '3D', '1w': 'W'
+        }
+        tv_int = tv_intervals.get(interval, '60')
+
         if isinstance(symbols, (list, tuple)):
             for sym in symbols:
-                url = f"https://www.binance.com/en/futures/{sym}"
+                url = f"{TRADINGVIEW_URL}?symbol=BINANCE:{sym}.P&interval={tv_int}"
                 webbrowser.open(url)
         
         # Clear selection after opening
