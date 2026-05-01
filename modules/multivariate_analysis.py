@@ -109,7 +109,7 @@ def multivariate_analysis_ui():
                     ui.input_numeric(
                         "window_size",
                         "Window Size",
-                        value=300,
+                        value=2000,
                         min=10,
                         max=2000
                     ),
@@ -117,8 +117,8 @@ def multivariate_analysis_ui():
                     ui.input_text(
                         "n_assets",
                         "Top Volume",
-                        value="20",
-                        placeholder="e.g. 20",
+                        value="50",
+                        placeholder="e.g. 50",
                         update_on="blur"
                     ),
 
@@ -217,7 +217,7 @@ def multivariate_analysis_ui():
                     ui.input_numeric(
                         "decomp_window",
                         "Window Size",
-                        value=100,
+                        value=2000,
                         min=10,
                         max=2000
                     ),
@@ -225,8 +225,8 @@ def multivariate_analysis_ui():
                     ui.input_text(
                         "decomp_n_assets",
                         "Top Volume",
-                        value="20",
-                        placeholder="e.g. 20",
+                        value="50",
+                        placeholder="e.g. 50",
                         update_on="blur"
                     ),
 
@@ -534,7 +534,10 @@ def multivariate_analysis_server(input, output, session):
                     corr_for_dist = filtered_matrix
                     
                     # 2. Get Distance Matrix
-                    dist_df = DecompositionEngine.distance_matrix(corr_for_dist.fillna(0))
+                    matrix_type = structure
+                    if structure == "Arbitrage":
+                        matrix_type = f"Arbitrage - {input.arb_method()}"
+                    dist_df = DecompositionEngine.distance_matrix(corr_for_dist.fillna(0), matrix_type=matrix_type)
                     
                     # 3. Hierarchical Linkage
                     res_cluster = DecompositionEngine.hierarchical_cluster(dist_df, method="complete")

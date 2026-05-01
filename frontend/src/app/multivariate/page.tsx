@@ -80,7 +80,8 @@ export default function MultivariatePage() {
          symbols: dSymbols, interval: dInterval,
          method: dMethod, window: dWindow,
          n_components: dComps, linkage_method: dLinkage,
-         data_source: mDataSource, data_structure: mDataStruct
+         data_source: mDataSource, data_structure: mDataStruct,
+         matrix_structure: mStructure, matrix_method: mMethod
        });
        setDecompData(res);
      } catch (err: any) {

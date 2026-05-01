@@ -408,33 +408,49 @@ class DataManager:
         if not os.path.exists(path):
             return None
             
+        df = None
         # Check cache
         if cache_key in self._cache:
             # Check if file has been modified since cached
             mtime = os.path.getmtime(path)
             if self._cache[cache_key]['mtime'] >= mtime:
-                return self._cache[cache_key]['data']
+                df = self._cache[cache_key]['data']
         
-        # Load from disk
-        try:
-            df = pd.read_parquet(path)
-            if not df.empty and 'open_time' in df.columns:
-                df['open_time'] = pd.to_datetime(df['open_time']) + timedelta(hours=TIMEZONE_OFFSET)
-                if 'close_time' in df.columns:
-                    df['close_time'] = pd.to_datetime(df['close_time']) + timedelta(hours=TIMEZONE_OFFSET)
-            # Simple LRU: if full, remove oldest (first inserted in dict)
-            if len(self._cache) >= self._cache_size:
-                oldest_key = next(iter(self._cache))
-                del self._cache[oldest_key]
+        if df is None:
+            # Load from disk
+            try:
+                df = pd.read_parquet(path)
+                if not df.empty and 'open_time' in df.columns:
+                    df['open_time'] = pd.to_datetime(df['open_time']) + timedelta(hours=TIMEZONE_OFFSET)
+                    if 'close_time' in df.columns:
+                        df['close_time'] = pd.to_datetime(df['close_time']) + timedelta(hours=TIMEZONE_OFFSET)
+                # Simple LRU: if full, remove oldest (first inserted in dict)
+                if len(self._cache) >= self._cache_size:
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                    
+                self._cache[cache_key] = {
+                    'data': df,
+                    'mtime': os.path.getmtime(path)
+                }
+            except Exception as e:
+                logger.error(f"Error loading {path}: {e}")
+                return None
+
+        # Append latest 1m data for realtime update
+        if df is not None and not df.empty and interval != '1m':
+            try:
+                df_1m = self.fetcher.fetch_candles(symbol, '1m', limit=1)
+                if not df_1m.empty:
+                    df_1m['open_time'] = pd.to_datetime(df_1m['open_time']) + timedelta(hours=TIMEZONE_OFFSET)
+                    if 'close_time' in df_1m.columns:
+                        df_1m['close_time'] = pd.to_datetime(df_1m['close_time']) + timedelta(hours=TIMEZONE_OFFSET)
+                    df = pd.concat([df, df_1m], ignore_index=True)
+                    df = df.drop_duplicates(subset=['open_time'], keep='last').reset_index(drop=True)
+            except Exception as e:
+                logger.error(f"Error fetching 1m realtime data for {symbol}: {e}")
                 
-            self._cache[cache_key] = {
-                'data': df,
-                'mtime': os.path.getmtime(path)
-            }
-            return df
-        except Exception as e:
-            logger.error(f"Error loading {path}: {e}")
-            return None
+        return df
 
     def clear_cache(self, symbol: Optional[str] = None, interval: Optional[str] = None):
         if symbol and interval:

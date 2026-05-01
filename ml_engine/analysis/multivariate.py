@@ -641,24 +641,42 @@ class DecompositionEngine:
         }
 
     @staticmethod
-    def distance_matrix(corr_matrix):
-        """D_ij = √(2(1 - ρ_ij))"""
-        vals = corr_matrix.values.copy()
-        # Keep only finite values, replace others with 0
+    def distance_matrix(matrix, matrix_type=None):
+        """Calculate distance matrix depending on the matrix type."""
+        vals = matrix.values.copy()
         vals = np.where(np.isfinite(vals), vals, 0)
         
-        # If values look like they aren't correlation (outside [-1, 1] significantly)
-        # normalize them to the [-1, 1] range to make the distance logic work
-        v_abs_max = np.max(np.abs(vals))
-        if v_abs_max > 1.001:
-            vals = vals / v_abs_max
+        if matrix_type == "Correlation" or matrix_type == "Partial Correlation":
+            vals = np.clip(vals, -1.0, 1.0)
+            dist = np.sqrt(np.maximum(2 * (1 - vals), 0))
+        elif matrix_type == "Covariance":
+            d = np.sqrt(np.maximum(np.diag(vals), 1e-8))
+            corr = vals / np.outer(d, d)
+            corr = np.clip(corr, -1.0, 1.0)
+            dist = np.sqrt(np.maximum(2 * (1 - corr), 0))
+        elif matrix_type == "Arbitrage - cointegration":
+            dist = np.maximum(vals, -10)
+            dist = (dist - np.min(dist))
+        elif matrix_type == "Arbitrage - halflife":
+            dist = np.clip(vals, 0, 100)
+        elif matrix_type == "Arbitrage - zscore":
+            max_z = np.max(np.abs(vals)) + 1e-8
+            sim = np.abs(vals) / max_z
+            dist = np.sqrt(np.maximum(2 * (1 - sim), 0))
+        elif matrix_type == "Arbitrage - vol_ratio":
+            dist = np.sqrt(np.maximum(2 * (1 - vals), 0))
+        elif matrix_type == "Arbitrage - arbitrage_score":
+            dist = np.sqrt(np.maximum(2 * (1 - vals), 0))
+        else:
+            # Fallback for unknown or backward compatibility
+            v_abs_max = np.max(np.abs(vals)) + 1e-8
+            if v_abs_max > 1.001:
+                vals = vals / v_abs_max
+            vals = np.clip(vals, -1.0, 1.0)
+            dist = np.sqrt(np.maximum(2 * (1 - vals), 0))
             
-        # Ensure values are clipped to [-1, 1] for correlation-based distance formula
-        vals = np.clip(vals, -1.0, 1.0)
-        
-        dist = np.sqrt(np.maximum(2 * (1 - vals), 0))
         np.fill_diagonal(dist, 0)
-        return pd.DataFrame(dist, index=corr_matrix.index, columns=corr_matrix.columns)
+        return pd.DataFrame(dist, index=matrix.index, columns=matrix.columns)
 
     @staticmethod
     def hierarchical_cluster(dist_matrix, method='ward'):

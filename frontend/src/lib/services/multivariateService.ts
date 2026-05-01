@@ -20,6 +20,9 @@ export interface DecompRequest {
   window?: number;
   n_components?: number;
   linkage_method?: string;
+  matrix_structure?: string;
+  matrix_method?: string;
+  mean_reversion?: boolean;
 }
 
 export const multivariateService = {

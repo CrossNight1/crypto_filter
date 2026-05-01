@@ -39,7 +39,7 @@ def pair_radar_ui():
                            choices={"ratio": "Ratio", "spread": "Spread"}, selected="spread"),
             ui.hr(),
             ui.input_numeric("rolling_window", "Rolling Window", value=320, min=5),
-            ui.input_numeric("pair_window", "Window", value=500, min=30),
+            ui.input_numeric("pair_window", "Window", value=2000, min=30),
         ),
         ui.card(
             ui.card_header("Pair Analysis Diagnostics"),
