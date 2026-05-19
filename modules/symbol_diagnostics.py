@@ -377,8 +377,8 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 last_ts = ts_series.iloc[-1]
                 unit = interval[-1]
                 val = int(interval[:-1])
-                unit_map = {'m': 'min', 'h': 'H', 'd': 'D', 'w': 'W'}
-                freq = f"{val}{unit_map.get(unit, 'H')}"
+                unit_map = {'m': 'min', 'h': 'h', 'd': 'd', 'w': 'W'}
+                freq = f"{val}{unit_map.get(unit, 'h')}"
                 
                 forecast_ts = pd.date_range(
                     start=last_ts + pd.Timedelta(freq), 

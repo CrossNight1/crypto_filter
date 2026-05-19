@@ -281,17 +281,12 @@ def pair_radar_server(input, output, session, global_interval):
             beta_stability = np.nan
             roll_window = window
             if len(y) > roll_window:
-                rolling_beta = []
-                for i in range(roll_window, len(y)):
-                    window_x = x[i-roll_window:i]
-                    window_y = y[i-roll_window:i]
-                    if np.std(window_x) == 0:
-                        rolling_beta.append(np.nan)
-                    else:
-                        b, _, _, _, _ = stats.linregress(window_x, window_y)
-                        rolling_beta.append(b)
-                
-                beta_stability = np.nanstd(rolling_beta) if rolling_beta else np.nan
+                s_y = pd.Series(y)
+                s_x = pd.Series(x)
+                cov_xy = s_y.rolling(roll_window).cov(s_x)
+                var_x = s_x.rolling(roll_window).var().replace(0, 1e-9)
+                rolling_beta = cov_xy / var_x
+                beta_stability = np.nanstd(rolling_beta.values)
 
             # Local zscore for SignalRate metric
             z_local = calculate_rolling_zscore(synthetic["close"], window)
@@ -340,26 +335,14 @@ def pair_radar_server(input, output, session, global_interval):
         df['corr_pearson'] = df["log_ret_a"].rolling(window).corr(df["log_ret_b"])
         df['corr_pearson_price'] = df["price_a"].rolling(window).corr(df["price_b"])
 
-        # Kendall Tau (Corrected logic)
-        def _roll_kendall(s1, s2, w):
-            res = np.full(len(s1), np.nan)
-            v1 = s1.values
-            v2 = s2.values
-            for i in range(w, len(s1)+1):
-                res[i-1] = stats.kendalltau(v1[i-w:i], v2[i-w:i])[0]
-            return res
-
-        df['corr_kendall'] = _roll_kendall(df["log_ret_a"], df["log_ret_b"], window)
-        df['corr_kendall_price'] = _roll_kendall(df["price_a"], df["price_b"], window)
-
         # Truncate for display
         df = df.tail(input.pair_window())
 
         fig = make_subplots(
-            rows=4, cols=1,
+            rows=3, cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.5, 0.15, 0.15, 0.15]
+            vertical_spacing=0.04,
+            row_heights=[0.6, 0.2, 0.2]
         )
 
         # Candlestick
@@ -412,7 +395,7 @@ def pair_radar_server(input, output, session, global_interval):
         fig.add_hline(y=2.0, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
         fig.add_hline(y=-2.0, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
 
-        # Correlation plots
+        # Correlation plots (Row 3)
         fig.add_trace(go.Scatter(
             x=df.index,
             y=_sanitize(df['corr_pearson']),
@@ -422,24 +405,10 @@ def pair_radar_server(input, output, session, global_interval):
 
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=_sanitize(df['corr_kendall']),
-            name="Kendall (Ret)",
-            line=dict(color="#00FA9A", width=1.5)
-        ), row=3, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=df.index,
             y=_sanitize(df['corr_pearson_price']),
             name="Pearson (Price)",
             line=dict(color="#FFA500", width=1.5)
-        ), row=4, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=_sanitize(df['corr_kendall_price']),
-            name="Kendall (Price)",
-            line=dict(color="#FF69B4", width=1.5)
-        ), row=4, col=1)
+        ), row=3, col=1)
 
         fig.update_layout(
             showlegend=True,
@@ -461,7 +430,7 @@ def pair_radar_server(input, output, session, global_interval):
 
         fig.update_xaxes(rangeslider_visible=False)
 
-        for i in [1, 2, 3, 4]:
+        for i in [1, 2, 3]:
             fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=False, row=i, col=1)
             fig.update_yaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=True,
                             zerolinecolor="rgba(255,255,255,0.2)", row=i, col=1)
@@ -772,18 +741,6 @@ def pair_radar_server(input, output, session, global_interval):
         df_plot['corr_pearson'] = df_plot["log_ret_a"].rolling(window).corr(df_plot["log_ret_b"])
         df_plot['corr_pearson_price'] = df_plot["price_a"].rolling(window).corr(df_plot["price_b"])
 
-        # Optimized Rolling Kendall for Comp Chart
-        def _roll_kendall(s1, s2, w):
-            res = np.full(len(s1), np.nan)
-            v1 = s1.values
-            v2 = s2.values
-            for i in range(w, len(s1)+1):
-                res[i-1] = stats.kendalltau(v1[i-w:i], v2[i-w:i])[0]
-            return res
-
-        df_plot['corr_kendall'] = _roll_kendall(df_plot["log_ret_a"], df_plot["log_ret_b"], window)
-        df_plot['corr_kendall_price'] = _roll_kendall(df_plot["price_a"], df_plot["price_b"], window)
-
         # Truncate for display
         df_plot = df_plot.tail(input.pair_window())
 
@@ -798,18 +755,13 @@ def pair_radar_server(input, output, session, global_interval):
         cum_ret_a_scaled = (ret_a / beta).cumsum()
         cum_ret_b_scaled = ret_b.cumsum()
 
-        # # Normalize prices for visual comparison on secondary axis
-        # slope, intercept, r_val, p_val, std_err = stats.linregress(df_plot["price_a"], df_plot["price_b"])
-        # price_a_norm = intercept + slope * df_plot["price_a"]
-        # price_b_norm = df_plot["price_b"]
-    
-        # Create figure with 3 rows: Performance, Corr (Return), Corr (Price)
+        # Create figure with 2 rows: Performance, Corr
         fig = make_subplots(
-            rows=3, cols=1,
+            rows=2, cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.6, 0.2, 0.2],
-            specs=[[{"secondary_y": True}], [{}], [{}]]
+            vertical_spacing=0.04,
+            row_heights=[0.7, 0.3],
+            specs=[[{"secondary_y": True}], [{}]]
         )
 
         # --- Stationary Price Calculation ---
@@ -869,24 +821,7 @@ def pair_radar_server(input, output, session, global_interval):
             
             fig.update_yaxes(title_text="Ratio to EMA", row=1, col=1, secondary_y=False)
 
-        # # Cointegration scaled price
-        # fig.add_trace(go.Scatter(
-        #     x=df_plot.index,
-        #     y=price_a_norm,
-        #     name=f"{input.symbol_a()} Coin Price",
-        #     line=dict(color="#F8F9FA", width=2, dash="dot"),
-        #     opacity=1
-        # ), row=1, col=1, secondary_y=True)
-
-        # fig.add_trace(go.Scatter(
-        #     x=df_plot.index,
-        #     y=price_b_norm,
-        #     name=f"{input.symbol_b()} Coin Price",
-        #     line=dict(color="#FB5607", width=2, dash="dot"),
-        #     opacity=1
-        # ), row=1, col=1, secondary_y=True)
-
-        # --- Row 2: Correlation (Return) ---
+        # --- Row 2: Correlation ---
         fig.add_trace(go.Scatter(
             x=df_plot.index,
             y=_sanitize(df_plot['corr_pearson']),
@@ -896,25 +831,10 @@ def pair_radar_server(input, output, session, global_interval):
 
         fig.add_trace(go.Scatter(
             x=df_plot.index,
-            y=_sanitize(df_plot['corr_kendall']),
-            name="Kendall (Ret)",
-            line=dict(color="#00FA9A", width=1)
-        ), row=2, col=1)
-
-        # --- Row 3: Correlation (Price) ---
-        fig.add_trace(go.Scatter(
-            x=df_plot.index,
             y=_sanitize(df_plot['corr_pearson_price']),
             name="Pearson (Price)",
             line=dict(color="#FFA500", width=1)
-        ), row=3, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=df_plot.index,
-            y=_sanitize(df_plot['corr_kendall_price']),
-            name="Kendall (Price)",
-            line=dict(color="#FF69B4", width=1)
-        ), row=3, col=1)
+        ), row=2, col=1)
 
         # Layout
         fig.update_layout(
@@ -938,9 +858,8 @@ def pair_radar_server(input, output, session, global_interval):
         fig.update_yaxes(row=1, col=1, secondary_y=False)
         fig.update_yaxes(row=1, col=1, secondary_y=True, showgrid=False)
         fig.update_yaxes(row=2, col=1)
-        fig.update_yaxes(row=3, col=1)
 
-        for i in [1, 2, 3]:
+        for i in [1, 2]:
             fig.update_xaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=False, row=i, col=1)
             fig.update_yaxes(gridcolor="rgba(255,255,255,0.15)", zeroline=True, 
                             zerolinecolor="rgba(255,255,255,0.2)", row=i, col=1)
