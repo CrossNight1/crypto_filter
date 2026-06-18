@@ -5,6 +5,7 @@ from src.data import BinanceFuturesFetcher, DataManager
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from datetime import datetime
 import pandas as pd
+import numpy as np
 import logging
 
 router = APIRouter()
@@ -32,6 +33,36 @@ def get_universe(top_n: int = 50):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/klines")
+def get_klines(symbol: str, interval: str = "1h", limit: int = 500):
+    """Return OHLCV candle data for a symbol from local cache."""
+    try:
+        df = manager.load_data(symbol, interval, auto_sync=False)
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail=f"No cached data for {symbol}/{interval}")
+
+        df = df.tail(limit).copy()
+        df['open_time'] = pd.to_datetime(df['open_time'])
+
+        candles = []
+        for _, row in df.iterrows():
+            ts = int(row['open_time'].timestamp())
+            candles.append({
+                "time": ts,
+                "open": float(row['open']),
+                "high": float(row['high']),
+                "low": float(row['low']),
+                "close": float(row['close']),
+                "volume": float(row['volume']) if 'volume' in row else 0.0
+            })
+
+        return {"symbol": symbol, "interval": interval, "candles": candles}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching klines for {symbol}/{interval}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 def background_fetch_task(req: FetchRequest):
     """Background task to fetch and cache data."""
     for sym in req.symbols:
@@ -41,12 +72,12 @@ def background_fetch_task(req: FetchRequest):
                 if req.mode == "Range":
                     end_t = datetime.now()
                     requested_start = end_t - pd.Timedelta(days=req.days_back)
-                    
+
                     end_t_utc = pd.to_datetime(end_t.timestamp(), unit='s')
                     req_start_utc = pd.to_datetime(requested_start.timestamp(), unit='s')
-                    
+
                     dfs_to_fetch = []
-                    
+
                     if not first_ts:
                         df_full = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_t)
                         if not df_full.empty:
@@ -58,14 +89,14 @@ def background_fetch_task(req: FetchRequest):
                             df_fwd = fetcher.fetch_history(sym, inter, start_time=start_ts_ms, end_time=end_t)
                             if not df_fwd.empty:
                                 dfs_to_fetch.append(df_fwd)
-                                
+
                         # Backward Map
                         if first_ts > req_start_utc + pd.Timedelta(minutes=5):
                             end_ts_ms = int(pd.Timestamp(first_ts).tz_localize('UTC').timestamp() * 1000) - 1
                             df_bwd = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_ts_ms)
                             if not df_bwd.empty:
                                 dfs_to_fetch.append(df_bwd)
-                                
+
                     if dfs_to_fetch:
                         final_df = pd.concat(dfs_to_fetch)
                         manager.append_data(sym, inter, final_df)
@@ -97,9 +128,6 @@ def get_metadata():
     """Get metadata for cached files"""
     try:
         metadata = manager.get_cache_metadata()
-        
-        return {"metadata": metadata}
-            
         return {"metadata": metadata}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

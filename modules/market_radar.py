@@ -76,8 +76,8 @@ def market_radar_ui():
 
                     # ----- LOG SCALE (single row) -----
                     ui.layout_columns(
-                        ui.input_checkbox("x_log", "Log X"),
-                        ui.input_checkbox("y_log", "Log Y"),
+                        ui.input_checkbox("x_log", "Rank X"),
+                        ui.input_checkbox("y_log", "Rank Y"),
                         # ui.input_checkbox("z_log", "Log Z"),
                         col_widths=[5, 5]
                     ),
@@ -181,8 +181,8 @@ def market_radar_ui():
 
                     # ----- LOG SCALE (single row) -----
                     ui.layout_columns(
-                        ui.input_checkbox("rpg_x_log", "Log X"),
-                        ui.input_checkbox("rpg_y_log", "Log Y"),
+                        ui.input_checkbox("rpg_x_log", "Rank X"),
+                        ui.input_checkbox("rpg_y_log", "Rank Y"),
                         col_widths=[5, 5]
                     ),
 
@@ -532,7 +532,7 @@ def market_radar_server(input, output, session, global_interval):
     
     @reactive.calc
     def filtered_snapshot_df():
-        df = snapshot_data.get()
+        df = snapshot_data.get().copy()
         if df.empty:
             return df
         
@@ -544,6 +544,14 @@ def market_radar_server(input, output, session, global_interval):
             
         if input.drop_zeros():
             df = df[df['volatility'] > 1e-9]
+            
+        x = input.x_axis()
+        y = input.y_axis()
+        
+        if input.x_log() and x in df.columns:
+            df[x] = pd.to_numeric(df[x], errors='coerce').rank(pct=True)
+        if input.y_log() and y in df.columns:
+            df[y] = pd.to_numeric(df[y], errors='coerce').rank(pct=True)
             
         return df
 
@@ -603,7 +611,6 @@ def market_radar_server(input, output, session, global_interval):
         for col in [x, y]:
             if col in plot_df.columns:
                 plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce').fillna(0)
-        
         if z != "None" and z in plot_df.columns:
             plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0)
             # px.scatter size must be positive
@@ -612,7 +619,8 @@ def market_radar_server(input, output, session, global_interval):
             
             fig = px.scatter(
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
-                hover_name='symbol', log_x=input.x_log(), log_y=input.y_log(),
+                hover_name='symbol',
+
                 color_continuous_scale='Spectral_r',
                 template="plotly_dark",
                 custom_data=['symbol']  # Add symbol to custom data for click events
@@ -620,7 +628,7 @@ def market_radar_server(input, output, session, global_interval):
         else:
             fig = px.scatter(
                 plot_df, x=x, y=y, hover_name='symbol',
-                log_x=input.x_log(), log_y=input.y_log(),
+
                 template="plotly_dark",
                 custom_data=['symbol']  # Add symbol to custom data for click events
             )
@@ -975,16 +983,20 @@ def market_radar_server(input, output, session, global_interval):
 
     @render_widget
     def rpg_chart():
-        df = rpg_data.get()
+        df = rpg_data.get().copy()
         if df.empty: return go.Figure()
         
         focus_sym = (input.rpg_focus_symbol() or "").strip().upper()
         has_focus = focus_sym in df['Symbol'].str.upper().values
         
+        if input.rpg_x_log() and 'X_Value' in df.columns:
+            df['X_Value'] = df['X_Value'].rank(pct=True)
+        if input.rpg_y_log() and 'Y_Value' in df.columns:
+            df['Y_Value'] = df['Y_Value'].rank(pct=True)
+            
         fig = px.line(
             df, x='X_Value', y='Y_Value', color='Symbol',
             markers=True,
-            log_x=input.rpg_x_log(), log_y=input.rpg_y_log(),
             template="plotly_dark", line_shape='spline'
         )
         

@@ -859,6 +859,28 @@ class MetricsEngine:
         from src.data import BinanceFuturesFetcher
         import time
         fetcher = BinanceFuturesFetcher()
+        funding_rates = fetcher.get_funding_rates()
+        adl_risks = fetcher.get_all_adl_risks()
+
+        # Map interval to Binance statistics period
+        period_mapping = {
+            '1m': '5m',
+            '3m': '5m',
+            '5m': '5m',
+            '15m': '15m',
+            '30m': '30m',
+            '1h': '1h',
+            '2h': '2h',
+            '4h': '4h',
+            '6h': '6h',
+            '8h': '6h',
+            '12h': '12h',
+            '1d': '1d',
+            '3d': '1d',
+            '1w': '1d',
+            '1M': '1d'
+        }
+        period = period_mapping.get(interval, '1h')
             
         for symbol, df in prices_data.items():
             try:
@@ -868,8 +890,11 @@ class MetricsEngine:
                 last_ts = df['open_time'].max() if 'open_time' in df.columns else None
                 cache_key = (symbol, interval, last_ts, len(df))
                 if cache_key in self._results_cache:
-                    results.append(self._results_cache[cache_key])
-                    continue
+                    cached_entry = self._results_cache[cache_key]
+                    if isinstance(cached_entry, dict) and 'compute_time' in cached_entry and 'data' in cached_entry:
+                        if time.time() - cached_entry['compute_time'] < 60:
+                            results.append(cached_entry['data'])
+                            continue
 
                 # Standardize and clean prices
                 prices = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(0).values.astype(float)
@@ -885,6 +910,26 @@ class MetricsEngine:
                 }
                 # Add all standard metrics to row
                 row.update(latest_adv)
+                row['funding_rate'] = funding_rates.get(symbol, np.nan)
+                
+                # Fetch statistics from Binance endpoints
+                oi_hist = fetcher.get_historical_stats(symbol, period, fetcher.OPEN_INTEREST_HIST)
+                top_pos = fetcher.get_historical_stats(symbol, period, fetcher.TOP_LS_POSITION)
+                top_acc = fetcher.get_historical_stats(symbol, period, fetcher.TOP_LS_ACCOUNT)
+                glob_acc = fetcher.get_historical_stats(symbol, period, fetcher.GLOBAL_LS_ACCOUNT)
+                taker_ratio = fetcher.get_historical_stats(symbol, period, fetcher.TAKER_BUY_SELL)
+                
+                # Compute OI / Circulating Supply
+                sum_oi = float(oi_hist.get("sumOpenInterest", 0))
+                circ_supply = float(oi_hist.get("CMCCirculatingSupply", 0))
+                oi_cs = sum_oi / circ_supply if circ_supply > 0 else np.nan
+                
+                row['oi_circulating'] = oi_cs
+                row['top_ls_position_ratio'] = float(top_pos.get("longShortRatio", np.nan))
+                row['top_ls_account_ratio'] = float(top_acc.get("longShortRatio", np.nan))
+                row['global_ls_ratio'] = float(glob_acc.get("longShortRatio", np.nan))
+                row['taker_buysell_ratio'] = float(taker_ratio.get("buySellRatio", taker_ratio.get("longShortRatio", np.nan)))
+                row['adl_risk'] = float(adl_risks.get(symbol, 0))
                 
                 # # Fetch orderbook metrics
                 # book_stats = fetcher.get_books_status(symbol)
@@ -895,7 +940,10 @@ class MetricsEngine:
                 time.sleep(0.05)
                 
                 # Store in cache
-                self._results_cache[cache_key] = row
+                self._results_cache[cache_key] = {
+                    'data': row,
+                    'compute_time': time.time()
+                }
                 results.append(row)
                 
             except Exception as e:

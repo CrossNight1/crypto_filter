@@ -8,6 +8,7 @@ import numpy as np
 import os
 import time
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import List, Optional, Union, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Import from config
 from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET, IGNORED_CRYPTO
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class BinanceFuturesFetcher:
@@ -26,10 +26,96 @@ class BinanceFuturesFetcher:
     KLINES = "/fapi/v1/klines"
     EXCHANGE_INFO = "/fapi/v1/exchangeInfo"
     ORDERBOOK = "/fapi/v1/depth"
+    PREMIUM_INDEX = "/fapi/v1/premiumIndex"
+    
+    SYMBOL_ADL_RISK = "/fapi/v1/symbolAdlRisk"
+    OPEN_INTEREST_HIST = "/futures/data/openInterestHist"
+    TOP_LS_POSITION = "/futures/data/topLongShortPositionRatio"
+    TOP_LS_ACCOUNT = "/futures/data/topLongShortAccountRatio"
+    GLOBAL_LS_ACCOUNT = "/futures/data/globalLongShortAccountRatio"
+    TAKER_BUY_SELL = "/futures/data/takerlongshortRatio"
+    
+    # Class-level caches shared across all instances
+    _adl_risk_cache = {}
+    _adl_risk_last_fetch = 0.0
+    _stats_cache = {}
+    _cache_expiry = 300.0  # 5 minutes cache
+    _cache_lock = threading.Lock()
     
     def __init__(self, rate_limit_delay: float = 0.05):
         self.session = requests.Session()
         self.rate_limit_delay = rate_limit_delay
+
+    def get_all_adl_risks(self) -> dict:
+        """Fetch all symbol ADL risks in one batch and return a map of {symbol: numeric_risk}"""
+        now = time.time()
+        with BinanceFuturesFetcher._cache_lock:
+            if BinanceFuturesFetcher._adl_risk_cache and (now - BinanceFuturesFetcher._adl_risk_last_fetch < BinanceFuturesFetcher._cache_expiry):
+                return BinanceFuturesFetcher._adl_risk_cache
+            
+        try:
+            data = self._request(self.SYMBOL_ADL_RISK)
+            if data and isinstance(data, list):
+                risk_map = {}
+                mapping = {"low": 0, "medium": 1, "high": 2}
+                for item in data:
+                    sym = item.get("symbol")
+                    risk_str = item.get("adlRisk", "").lower()
+                    risk_map[sym] = mapping.get(risk_str, 0)
+                
+                with BinanceFuturesFetcher._cache_lock:
+                    BinanceFuturesFetcher._adl_risk_cache = risk_map
+                    BinanceFuturesFetcher._adl_risk_last_fetch = now
+        except Exception as e:
+            logger.error(f"Error fetching ADL risks: {e}")
+            
+        with BinanceFuturesFetcher._cache_lock:
+            return BinanceFuturesFetcher._adl_risk_cache
+
+    def get_historical_stats(self, symbol: str, period: str, endpoint: str) -> dict:
+        """Generic method to fetch and cache historical stats endpoints with limit=1"""
+        now = time.time()
+        cache_key = (symbol, period, endpoint)
+        with BinanceFuturesFetcher._cache_lock:
+            if cache_key in BinanceFuturesFetcher._stats_cache:
+                ts, val = BinanceFuturesFetcher._stats_cache[cache_key]
+                if now - ts < BinanceFuturesFetcher._cache_expiry:
+                    return val
+                
+        try:
+            params = {"symbol": symbol, "period": period, "limit": 1}
+            data = self._request(endpoint, params=params)
+            
+            res = {}
+            if data and isinstance(data, list) and len(data) > 0:
+                res = data[-1]  # Get latest item
+                
+            with BinanceFuturesFetcher._cache_lock:
+                BinanceFuturesFetcher._stats_cache[cache_key] = (now, res)
+            return res
+        except Exception as e:
+            logger.error(f"Error fetching {endpoint} for {symbol} ({period}): {e}")
+            return {}
+
+    def get_historical_stats_series(self, symbol: str, period: str, endpoint: str, limit: int = 30) -> list:
+        """Fetch historical series for Binance statistics endpoints"""
+        try:
+            params = {"symbol": symbol, "period": period, "limit": limit}
+            data = self._request(endpoint, params=params)
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"Error fetching {endpoint} series for {symbol}: {e}")
+            return []
+            
+    def get_historical_funding_rate(self, symbol: str, limit: int = 30) -> list:
+        """Fetch historical funding rates for a symbol"""
+        try:
+            params = {"symbol": symbol, "limit": limit}
+            data = self._request("/fapi/v1/fundingRate", params=params)
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"Error fetching funding rate series for {symbol}: {e}")
+            return []
 
     def _request(self, endpoint: str, params: dict = None) -> dict:
         url = f"{self.BASE_URL}{endpoint}"
@@ -56,6 +142,12 @@ class BinanceFuturesFetcher:
         bids['side'] = 'bid'
         asks['side'] = 'ask'
         return pd.concat([bids, asks])
+
+    def get_funding_rates(self) -> dict:
+        """Get latest funding rates for all symbols"""
+        data = self._request(self.PREMIUM_INDEX)
+        if not data: return {}
+        return {item['symbol']: float(item.get('lastFundingRate', 0)) for item in data}
 
     def get_books_status(self, symbol: str, impact_usd: float = 1000, imbalance_pct: float = 0.05):
         """

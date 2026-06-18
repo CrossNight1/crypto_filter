@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, Space_Mono } from "next/font/google";
 import "./globals.css";
-import { Sidebar } from "@/components/layout/sidebar";
+import { TopNav } from "@/components/layout/topnav";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const spaceMono = Space_Mono({ weight: ["400", "700"], subsets: ["latin"], variable: "--font-space-mono" });
@@ -18,9 +18,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} ${spaceMono.variable} font-sans antialiased bg-background text-foreground min-h-screen flex selection:bg-primary/30`}>
-        <Sidebar className="w-64 border-r border-border shrink-0 fixed h-full z-10" />
-        <main className="flex-1 ml-64 p-8 relative min-h-screen overflow-x-hidden">
+      <body className={`${inter.variable} ${spaceMono.variable} font-sans antialiased bg-background text-foreground min-h-screen flex flex-col selection:bg-primary/30`}>
+        <TopNav />
+        <main className="flex-1 pt-24 px-8 pb-8 relative min-h-screen overflow-x-hidden">
           {children}
         </main>
       </body>

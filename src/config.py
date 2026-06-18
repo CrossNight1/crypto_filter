@@ -82,6 +82,13 @@ METRIC_LABELS = {
     'breakout_score_break': 'Breakout Score v2',
     'orderbook_imbalance': 'OBook Imbalance',
     'spread': 'Spread',
+    'funding_rate': 'Funding Rate',
+    'oi_circulating': 'OI / Circulating Supply',
+    'top_ls_position_ratio': 'Top Trader L/S (Position)',
+    'top_ls_account_ratio': 'Top Trader L/S (Account)',
+    'global_ls_ratio': 'Global L/S Account Ratio',
+    'taker_buysell_ratio': 'Taker Buy/Sell Volume Ratio',
+    'adl_risk': 'ADL Risk Rating',
     'None': 'None'
 }
 
@@ -95,7 +102,8 @@ ALL_METRICS = [
     'autocorr_1', 'autocorr_5', 'imbalance_bar', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank',
     'max_drawdown', 'avg_drawdown',
     'breakout_score_dist', 'breakout_score_break',
-    'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20'
+    # 'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20',
+    'funding_rate','oi_circulating', 'top_ls_position_ratio', 'top_ls_account_ratio', 'global_ls_ratio', 'taker_buysell_ratio', 'adl_risk'
 ]
 
 DEFAULT_FEATURES = [
@@ -107,5 +115,7 @@ DEFAULT_FEATURES = [
     'autocorr_1', 'autocorr_5', 
     'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank',
     'max_drawdown', 'avg_drawdown',
-    'breakout_score_dist', 'breakout_score_break'
+    'breakout_score_dist', 'breakout_score_break',
+    'funding_rate',
+    'oi_circulating', 'top_ls_position_ratio', 'top_ls_account_ratio', 'global_ls_ratio', 'taker_buysell_ratio', 'adl_risk'
 ]

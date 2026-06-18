@@ -63,6 +63,7 @@ def forecast_garch(returns, steps=10, ann_factor=1):
     fc_var = fc.variance.values[-1]
     fc_vol = np.sqrt(fc_var) * np.sqrt(ann_factor)
     return fc_vol, hist_vol
+    return fc_vol, hist_vol
 
 # --- STYLING CONSTANTS ---
 THEME_BG = "#0b3d91"
@@ -76,10 +77,10 @@ def apply_theme(fig):
         paper_bgcolor=THEME_BG,
         plot_bgcolor=THEME_BG,
         font=dict(family=THEME_FONT, color=THEME_TEXT),
-        xaxis=dict(gridcolor=THEME_GRID, zerolinecolor=THEME_ZERO),
-        yaxis=dict(gridcolor=THEME_GRID, zerolinecolor=THEME_ZERO),
         margin=dict(l=20, r=20, t=30, b=20)
     )
+    fig.update_xaxes(gridcolor=THEME_GRID, zerolinecolor=THEME_ZERO)
+    fig.update_yaxes(gridcolor=THEME_GRID, zerolinecolor=THEME_ZERO)
     return fig
 
 def symbol_diagnostics_ui():
@@ -115,6 +116,7 @@ def symbol_diagnostics_ui():
                                     ui.value_box("Alpha", ui.output_text("val_alpha"), theme="success", class_="small-box"),
                                     ui.value_box("Impact Spread", ui.output_text("val_impact_spread"), theme="warning", class_="small-box"),
                                     ui.value_box("OBook Imbalance", ui.output_text("val_imbalance"), theme="teal", class_="small-box"),
+                                    ui.value_box("ADL Risk", ui.output_text("val_adl_risk"), theme="danger", class_="small-box"),
                                     class_="d-flex flex-row flex-nowrap gap-1 overflow-auto justify-content-between",
                                     style="padding-bottom: 5px;"
                                 )                               
@@ -134,7 +136,13 @@ def symbol_diagnostics_ui():
                                 )
                             ),
                             
-                            # 3. Forecast
+                            # 3. Trading Statistics (Binance)
+                            ui.card(
+                                ui.card_header("Trading Statistics (Binance Futures)"),
+                                output_widget("plot_trading_stats")
+                            ),
+                            
+                            # 4. Forecast
                             ui.card(
                                 ui.card_header("Forecast (Forward 10 periods)"),
                                 ui.layout_columns(
@@ -337,12 +345,21 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 
             # Factor Decomp - Load ALL symbols for comprehensive analysis
             market_data = {}
-            for s in MANDATORY_CRYPTO:
-                if s in IGNORED_CRYPTO:
-                    continue
-                d = manager.load_data(s, interval)
-                if d is not None:
-                    market_data[s] = pd.to_numeric(d['close'], errors='coerce').pct_change()
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            def _load_sym(s_name):
+                d = manager.load_data(s_name, interval)
+                if d is not None and not d.empty:
+                    return s_name, pd.to_numeric(d['close'], errors='coerce').pct_change()
+                return s_name, None
+                
+            syms_to_load = [s for s in MANDATORY_CRYPTO if s not in IGNORED_CRYPTO]
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futs = [executor.submit(_load_sym, s) for s in syms_to_load]
+                for fut in as_completed(futs):
+                    s_name, ret_series = fut.result()
+                    if ret_series is not None:
+                        market_data[s_name] = ret_series
             
             factor_df = pd.DataFrame(market_data).ffill().fillna(0).tail(window)
             mn_cum_ret = pd.Series(dtype=float)
@@ -400,7 +417,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    model = ARIMA(log_history, order=(2,1,2))
+                    model = ARIMA(log_history, order=(1,1,1))
                     model_fit = model.fit()
                     fc_res = model_fit.get_forecast(steps=10)
                 
@@ -472,6 +489,36 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 logger.log("Symbol Diagnostics", "ERROR", f"Orderbook fetch failed: {e}")
                 book_status = {}
 
+            # 8. Trading Statistics (Binance)
+            p.set(98, message="Fetching Trading Stats...")
+            period_mapping = {
+                '1m': '5m', '3m': '5m', '5m': '5m', '15m': '15m',
+                '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h',
+                '6h': '6h', '8h': '6h', '12h': '12h', '1d': '1d',
+                '3d': '1d', '1w': '1d', '1M': '1d'
+            }
+            period = period_mapping.get(interval, '1h')
+            limit = min(window, 500)
+            
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                f_oi = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.OPEN_INTEREST_HIST, limit=limit)
+                f_pos = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.TOP_LS_POSITION, limit=limit)
+                f_acc = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.TOP_LS_ACCOUNT, limit=limit)
+                f_g_acc = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.GLOBAL_LS_ACCOUNT, limit=limit)
+                f_taker = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.TAKER_BUY_SELL, limit=limit)
+                f_fund = executor.submit(manager.fetcher.get_historical_funding_rate, symbol, limit=limit)
+                
+                oi_hist = f_oi.result()
+                top_pos = f_pos.result()
+                top_acc = f_acc.result()
+                glob_acc = f_g_acc.result()
+                taker_ratio = f_taker.result()
+                fund_hist = f_fund.result()
+            
+            adl_risk_map = manager.fetcher.get_all_adl_risks()
+            current_adl_risk = adl_risk_map.get(symbol, 0)
+
             # Pack Data
             data_pack = {
                 "sharpe": res_sharpe,
@@ -500,7 +547,14 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                 },
                 "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values},
                 "impact_spread": book_status.get("impact_spread"),
-                "imbalance": book_status.get("orderbook_imbalance")
+                "imbalance": book_status.get("orderbook_imbalance"),
+                "adl_risk": current_adl_risk,
+                "ts_oi": oi_hist,
+                "ts_top_pos": top_pos,
+                "ts_top_acc": top_acc,
+                "ts_glob_acc": glob_acc,
+                "ts_taker": taker_ratio,
+                "ts_fund": fund_hist
             }
             
             diag_data.set(data_pack)
@@ -559,6 +613,70 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         d = diag_data.get()
         v = d.get('imbalance')
         return f"{v*100:.2f}%" if v is not None else "-"
+
+    @render.text
+    def val_adl_risk():
+        d = diag_data.get()
+        return f"{d.get('adl_risk', 0)}" if d else "-"
+
+    @render_widget
+    def plot_trading_stats():
+        d = diag_data.get()
+        if not d: return go.Figure()
+        
+        from plotly.subplots import make_subplots
+        fig = make_subplots(rows=3, cols=2, subplot_titles=(
+            "Funding Rate", "OI / Circulating", 
+            "Top Trader L/S (Pos)", "Top Trader L/S (Acc)", 
+            "Global L/S Account", "Taker Buy/Sell Vol"
+        ))
+        
+        # Funding
+        if d.get("ts_fund"):
+            df = pd.DataFrame(d["ts_fund"])
+            if not df.empty and 'fundingTime' in df.columns:
+                df['time'] = pd.to_datetime(df['fundingTime'], unit='ms')
+                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df['fundingRate']), name="Funding Rate", line=dict(color='cyan')), row=1, col=1)
+                
+        # OI
+        if d.get("ts_oi"):
+            df = pd.DataFrame(d["ts_oi"])
+            if not df.empty and 'timestamp' in df.columns:
+                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df['oi_circ'] = pd.to_numeric(df.get('sumOpenInterest', 0)) / pd.to_numeric(df.get('CMCCirculatingSupply', 1)).replace(0, np.nan)
+                fig.add_trace(go.Scatter(x=df['time'], y=df['oi_circ'], name="OI / Circ", line=dict(color='orange')), row=1, col=2)
+                
+        # Top Pos
+        if d.get("ts_top_pos"):
+            df = pd.DataFrame(d["ts_top_pos"])
+            if not df.empty and 'timestamp' in df.columns:
+                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df.get('longShortRatio', 0)), name="Top L/S Pos", line=dict(color='lime')), row=2, col=1)
+                
+        # Top Acc
+        if d.get("ts_top_acc"):
+            df = pd.DataFrame(d["ts_top_acc"])
+            if not df.empty and 'timestamp' in df.columns:
+                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df.get('longShortRatio', 0)), name="Top L/S Acc", line=dict(color='lime')), row=2, col=2)
+                
+        # Global Acc
+        if d.get("ts_glob_acc"):
+            df = pd.DataFrame(d["ts_glob_acc"])
+            if not df.empty and 'timestamp' in df.columns:
+                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df.get('longShortRatio', 0)), name="Global L/S Acc", line=dict(color='magenta')), row=3, col=1)
+                
+        # Taker Buy/Sell
+        if d.get("ts_taker"):
+            df = pd.DataFrame(d["ts_taker"])
+            if not df.empty and 'timestamp' in df.columns:
+                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+                ratio = pd.to_numeric(df.get('buySellRatio', df.get('longShortRatio', 0)))
+                fig.add_trace(go.Scatter(x=df['time'], y=ratio, name="Taker Buy/Sell", line=dict(color='yellow')), row=3, col=2)
+                
+        fig.update_layout(template="plotly_dark", height=800, showlegend=False, margin=dict(t=40, b=20, l=20, r=20), paper_bgcolor=THEME_BG, plot_bgcolor=THEME_BG)
+        return apply_theme(fig)
 
     @render_widget
     def plot_metrics():
